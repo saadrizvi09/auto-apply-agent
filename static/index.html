@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AutoApply</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="app">
+
+    <!-- ===== Top bar ===== -->
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7Z"/></svg>
+        </div>
+        <div class="brand-text">
+          <h1>AutoApply</h1>
+          <p class="tagline">Local job-application emailer</p>
+        </div>
+      </div>
+      <nav class="nav">
+        <a href="/" class="nav-link active">Dashboard</a>
+        <a href="/applications" class="nav-link">Applications</a>
+      </nav>
+      <div class="topbar-right">
+        <span id="dry-badge" class="badge badge-dry" title="Dry run: nothing is actually sent">
+          <span class="dot"></span> DRY RUN
+        </span>
+        <span class="badge badge-local" title="Server bound to 127.0.0.1">localhost</span>
+      </div>
+    </header>
+
+    <!-- ===== Supporting-channel banner ===== -->
+    <div id="banner" class="banner"></div>
+
+    <!-- ===== Stat cards ===== -->
+    <section class="stats" aria-label="Quotas and budget">
+      <div class="stat-card">
+        <div class="stat-ico ico-send">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7Z"/></svg>
+        </div>
+        <div class="stat-body">
+          <span class="stat-label">Send budget today</span>
+          <span id="q-send" class="stat-val">—</span>
+          <div class="stat-bar"><span id="q-send-bar" class="stat-bar-fill"></span></div>
+        </div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-ico ico-cse">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        </div>
+        <div class="stat-body">
+          <span class="stat-label">Custom Search</span>
+          <span id="q-cse" class="stat-val">—</span>
+          <span class="stat-sub">queries / day</span>
+        </div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-ico ico-hunter">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg>
+        </div>
+        <div class="stat-body">
+          <span class="stat-label">Hunter verifies</span>
+          <span id="q-hunter" class="stat-val">—</span>
+          <span class="stat-sub">per month</span>
+        </div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-ico ico-bounce">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/></svg>
+        </div>
+        <div class="stat-body">
+          <span class="stat-label">Bounce rate</span>
+          <span id="q-bounce" class="stat-val">—</span>
+          <span class="stat-sub">auto-pause at 3%</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== Pause banner ===== -->
+    <div id="pause-banner" class="pause-banner hidden">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><circle cx="12" cy="12" r="10"/></svg>
+      <span>Sending is paused (bounce-rate auto-pause). Re-verify your list, then</span>
+      <button id="btn-resume" class="link-btn">resume sending</button>
+    </div>
+
+    <!-- ===== Import from file ===== -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Import from file</h2>
+        <span class="panel-hint">Bulk-add companies &amp; contacts from CSV / Excel</span>
+        <span class="spacer"></span>
+        <a id="dl-template" href="/api/import/template" class="link-btn">Download template</a>
+      </div>
+      <div id="dropzone" class="dropzone" tabindex="0">
+        <input id="file-input" type="file" accept=".csv,.xlsx" hidden />
+        <div class="dz-ico">
+          <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>
+        </div>
+        <p class="dz-title">Drop an Excel/CSV file here, or <span class="dz-browse">browse</span></p>
+        <p class="dz-sub">Columns: <code>company</code>, <code>role</code>, <code>email</code>, <code>domain</code>, <code>location</code>, <code>apply_url</code>, <code>verified</code></p>
+      </div>
+      <div id="import-bar" class="import-bar hidden">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+        <span id="import-file" class="import-file"></span>
+        <span class="spacer"></span>
+        <button id="btn-import-cancel" class="link-btn">cancel</button>
+        <button id="btn-import" class="btn-primary">Import file</button>
+      </div>
+    </section>
+
+    <!-- ===== Paste-anything dump -> auto-apply forms ===== -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Paste &amp; apply — emails, form links, anything</h2>
+        <span class="panel-hint">Dump referral emails or Google Form links; it splits them into jobs &amp; auto-fills the forms</span>
+        <span class="spacer"></span>
+        <button id="btn-ref-scan" class="link-btn" title="Search Gmail for referral digests (real mode only)">Scan Gmail</button>
+      </div>
+      <div class="profile-bar">
+        <span id="profile-status" class="profile-status">checking profile…</span>
+        <span class="spacer"></span>
+        <button id="btn-read-resume" class="link-btn" title="Read cv.pdf and fill blank profile fields">Read résumé → autofill</button>
+      </div>
+      <textarea id="ref-text" class="ref-text" rows="5"
+        placeholder="Paste anything — a referral email, a list of Google Form links, multiple emails…"></textarea>
+      <div class="ref-actions">
+        <span id="ref-msg" class="ref-msg"></span>
+        <span class="spacer"></span>
+        <button id="btn-ref-parse" class="btn-primary">Parse &amp; add jobs</button>
+      </div>
+
+      <div id="forms-block" class="forms-block hidden">
+        <div class="forms-head">
+          <h3>Form applications</h3>
+          <span id="forms-count" class="count-pill">0</span>
+          <span class="spacer"></span>
+          <span id="fill-hint" class="panel-hint"></span>
+          <button id="btn-forms-prefill" class="btn-primary">Prepare pre-filled links</button>
+        </div>
+        <div id="forms-list" class="forms-list"></div>
+      </div>
+    </section>
+
+    <!-- ===== Filters ===== -->
+    <section class="panel filters-panel">
+      <div class="panel-head">
+        <h2>Find jobs</h2>
+        <span class="panel-hint">Scrapes LinkedIn → applies your filters → finds HR emails. Each filter changes the search.</span>
+      </div>
+      <div class="filters">
+        <label class="field">
+          <span class="field-label">Role</span>
+          <input id="f-role" type="text" placeholder="AI Agents Engineer…" />
+          <span class="field-hint">Blank = AI Agents + LLM + Backend</span>
+        </label>
+        <label class="field">
+          <span class="field-label">Location</span>
+          <input id="f-location" type="text" placeholder="United States…" />
+          <span class="field-hint">Blank = India + US + Germany</span>
+        </label>
+        <label class="field">
+          <span class="field-label">Keywords</span>
+          <input id="f-keywords" type="text" placeholder="python, rag, react…" />
+          <span class="field-hint">Extra terms added to each role</span>
+        </label>
+        <label class="field field-sm">
+          <span class="field-label">Min LPA</span>
+          <input id="f-min-lpa" type="number" min="0" step="1" placeholder="8" />
+          <span class="field-hint">Drops lower paid (if shown)</span>
+        </label>
+        <label class="field field-sm">
+          <span class="field-label">Max team size</span>
+          <input id="f-max-headcount" type="number" min="0" step="50" placeholder="500" />
+          <span class="field-hint">Startup bias — drops bigger</span>
+        </label>
+      </div>
+      <div class="filters-actions">
+        <label class="remote-toggle">
+          <input id="f-remote" type="checkbox" checked />
+          <span class="switch"></span>
+          <span>Remote only</span>
+        </label>
+        <span class="spacer"></span>
+        <button id="btn-reset-filters" type="button" class="btn-ghost">Reset filters</button>
+        <button id="btn-find" type="button" class="btn-find">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+          Find new jobs
+        </button>
+      </div>
+      <div id="find-summary" class="find-summary hidden"></div>
+    </section>
+
+    <!-- ===== Pipeline ===== -->
+    <section class="pipeline" aria-label="Pipeline actions">
+      <button id="btn-discover" data-stage="discover" class="step">
+        <span class="step-num">1</span>
+        <span class="step-ico"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></span>
+        <span class="step-label">Find Jobs</span>
+      </button>
+      <span class="step-sep"></span>
+      <button id="btn-contacts" data-stage="contacts" class="step">
+        <span class="step-num">2</span>
+        <span class="step-ico"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="m22 8-3 3-1.5-1.5"/></svg></span>
+        <span class="step-label">Find Contacts</span>
+      </button>
+      <span class="step-sep"></span>
+      <button id="btn-draft" data-stage="draft" class="step">
+        <span class="step-num">3</span>
+        <span class="step-ico"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></span>
+        <span class="step-label">Draft Emails</span>
+      </button>
+      <span class="step-sep"></span>
+      <button id="btn-send" data-stage="send" class="step step-accent">
+        <span class="step-num">4</span>
+        <span class="step-ico"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7Z"/></svg></span>
+        <span class="step-label">Review &amp; Send</span>
+      </button>
+      <span class="step-sep"></span>
+      <button id="btn-scan" data-stage="scan" class="step">
+        <span class="step-num">5</span>
+        <span class="step-ico"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg></span>
+        <span class="step-label">Scan Replies</span>
+      </button>
+    </section>
+
+    <!-- ===== Assisted LinkedIn Easy Apply ===== -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Apply on LinkedIn (assisted)</h2>
+        <span class="panel-hint">Opens Easy-Apply jobs in your logged-in Chrome, pre-fills them — you review + Submit. Never auto-submits.</span>
+        <span class="spacer"></span>
+        <span id="li-count" class="count-pill">0</span>
+        <button id="btn-li-apply" type="button" class="btn-ghost">Assisted (you submit)</button>
+        <button id="btn-li-stop" type="button" class="btn-ghost hidden" style="color:var(--danger,#e5534b);border-color:var(--danger,#e5534b)">Stop</button>
+        <button id="btn-li-auto" type="button" class="btn-find">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20.45 20.45h-3.56v-5.57c0-1.33-.02-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.35V9h3.41v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.13 2.06 2.06 0 0 1 0 4.13zM7.12 20.45H3.56V9h3.56v11.45zM22.22 0H1.77C.79 0 0 .77 0 1.73v20.54C0 23.22.79 24 1.77 24h20.45c.98 0 1.78-.78 1.78-1.73V1.73C24 .77 23.2 0 22.22 0z"/></svg>
+          Auto-apply (autonomous)
+        </button>
+      </div>
+      <div id="li-result" class="find-summary hidden"></div>
+      <div id="li-queue" class="li-queue"></div>
+      <p class="li-hint">
+        One-time setup: <code>py -3.11 formtool.py lilogin</code> (log into LinkedIn, close the window).
+        <b>Auto-apply</b> submits to India Easy-Apply jobs end-to-end (answer bank from your profile),
+        <b>skips</b> any job with a question it can't answer, and <b>stops on a LinkedIn security check</b>.
+        Daily cap ramps to <code>LI_DAILY_CAP</code> (default 30). <b>Assisted</b> just pre-fills and you submit.
+      </p>
+    </section>
+
+    <!-- ===== Status toast ===== -->
+    <div id="status-msg" class="status-msg" role="status"></div>
+
+    <!-- ===== Review panel (drafts) ===== -->
+    <section id="review-panel" class="panel review-panel hidden">
+      <div class="panel-head">
+        <h2>Review drafts</h2>
+        <span class="panel-hint">Unverified recipients are unchecked by default</span>
+        <span class="spacer"></span>
+        <button id="btn-send-approved" class="btn-primary">Send approved (0)</button>
+      </div>
+      <div id="review-list" class="review-list"></div>
+    </section>
+
+    <!-- ===== Applications table ===== -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Applications</h2>
+        <span id="apps-count" class="count-pill">0</span>
+      </div>
+      <div class="table-wrap">
+        <table id="apps-table">
+          <thead>
+            <tr>
+              <th>Company</th><th>Role</th><th>Status</th><th>Last checked</th><th>Reply snippet</th>
+            </tr>
+          </thead>
+          <tbody id="apps-body">
+            <tr><td colspan="5" class="empty">No applications yet — start with ① Find Jobs.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer class="foot">AutoApply · local only (127.0.0.1) · a supporting channel</footer>
+  </div>
+
+  <script src="/static/app.js"></script>
+  <script src="/static/referrals.js"></script>
+</body>
+</html>

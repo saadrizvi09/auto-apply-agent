@@ -1,0 +1,122 @@
+============================================================
+AutoApply - job research prompt (v4: EMAIL-REACHABLE ONLY)
+Paste to Claude (web-search ON if possible) to generate a job
+list that imports into the "Import from file" panel.
+Edit the [bracketed] parts in "MY DETAILS" once, then run.
+============================================================
+
+WHY THIS VERSION IS DIFFERENT
+My tool's whole job is to *email a real human* (founder / eng-lead /
+recruiter) and track the reply. Big companies (Google, Microsoft, Amazon,
+Adobe, Amex, Zomato, Paytm, Flipkart, etc.) ONLY accept applications through
+an ATS portal - there is no inbox a cold email can reach, so they are useless
+to me. DO NOT include them. I want ONLY companies where sending one
+well-targeted email to a findable human is a realistic path to an interview.
+
+ROLE
+You are a job-sourcing assistant. Build me a CSV of current openings at
+EMAIL-REACHABLE companies. Do NOT ask clarifying questions - every decision is
+pre-answered below. If you have web/browse access, USE IT to find live, open
+listings, real company domains, and (when published) real contact emails. If
+you do not have browse access, give a best-effort curated list of the RIGHT
+KIND of company (small/mid funded startup with its own domain) and leave email
+blank - my tool finds the email later.
+
+MY DETAILS (the only things you need from me)
+- Target: [both summer/now internships AND full-time SDE-1 / new-grad]
+- Graduation / availability: [graduating ~May 2026; available from June 2026]
+- Profile: final-year B.Tech (ECE), AI/backend engineer - Python & TypeScript,
+  FastAPI, Next.js, LLM / agent / RAG systems. Prefer backend, full-stack, AI/ML,
+  or generalist SDE roles.
+- Location: [Delhi NCR, remote-India, OR remote roles at US / Germany / EU
+  startups that hire internationally]. Remote-from-India is great.
+- SALARY FLOOR (hard): minimum ~7-8 LPA guaranteed for full-time. EXCLUDE any
+  India role where a new-grad SDE would plausibly earn less than this. For
+  internships, target a stipend of at least ~25-40k/month (skip token/unpaid ones).
+  NOTE: international remote roles essentially always clear this floor in INR
+  terms, so include them freely - the floor only filters low-paying India roles.
+- MY ANGLE for international startups: I am a strong AI/backend engineer who can
+  work remotely from India for a fraction of a US/EU hire's cost - senior-quality
+  output, startup budget. This is a real selling point for small foreign startups.
+
+THE ONE RULE THAT MATTERS: EMAIL-REACHABILITY
+Include a company ONLY if a cold email to a real person could plausibly be read
+and acted on. Use this test for every row:
+
+  INCLUDE (the sweet spot):
+  - YC / Techstars / early-stage AI startups (US, Germany/EU, or India) that are
+    actively hiring AI / ML / backend engineers. These are the BEST targets:
+    founders publicly list their email (YC directory, the company site, LinkedIn,
+    Twitter/X), read cold email themselves, and hire fast. Remote-friendly ones
+    that hire from India are ideal - lead with my cost/quality angle.
+  - Funded startups, roughly Seed / Series A / B / C, about 10-300 employees.
+  - Has its OWN company domain (e.g. acme.ai) - so a careers@/jobs@/founders@
+    address or a first.last@domain pattern is findable.
+  - Small enough that a founder, hiring manager, or eng-lead realistically reads
+    direct email; many of these even publish a careers or founder email.
+  - Pays the salary floor (well-funded AI/product startups do; international
+    remote roles clear it easily).
+
+  EXCLUDE (no human inbox - skip entirely):
+  - FAANG / MAANG and any large enterprise (Google, Microsoft, Amazon, Adobe,
+    Meta, Apple, Oracle, SAP, IBM, Salesforce, Amex, banks, consultancies).
+  - Big Indian unicorns / public cos that hire only via ATS (Zomato, Paytm,
+    Flipkart, Swiggy, PhonePe, Cars24, Delhivery, MakeMyTrip, Urban Company...).
+  - Anything whose "apply" path is purely a giant careers portal with no
+    reachable team. If you can't imagine emailing a person there, leave it out.
+
+DECISIONS (do not ask - just apply these)
+1. Prioritize in this order, all EMAIL-REACHABLE per the rule above:
+   (a) YC / early-stage AI startups (US / Germany/EU / India) hiring AI/ML/backend
+       engineers, remote-friendly, with a findable founder/eng email - TOP priority,
+   (b) well-funded AI / LLM / dev-tools startups (Series A-C) paying market comp,
+   (c) funded product startups / scale-ups still small enough to email a human,
+   (d) smaller but clearly well-paying engineering-led startups.
+   Pre-seed YC/AI startups ARE allowed here (unlike India pre-seed) because they
+   are extremely reachable and a remote-India hire fits their budget.
+   Aim for a mix: at least a third of the rows should be YC / international.
+2. EMAIL column - your best lever:
+   - If you find a genuinely published, official address (careers@/jobs@/
+     hiring@/founder or eng-lead's real email on the site, LinkedIn, AngelList,
+     a job post, or a press page), put it in `email` and set `verified=no`
+     (my tool verifies it before any send).
+   - If you cannot find a real one, leave `email` BLANK - do NOT invent or guess
+     an address. A wrong address bounces and hurts my sending reputation. Blank
+     is fine; my tool discovers the pattern + verifies via Hunter afterward.
+   - Set `verified=yes` only for an address you are highly confident is correct.
+3. SALARY column: if comp is stated or reliably known, put the range (e.g.
+   "8-12 LPA"). If unknown, leave BLANK and include the company only if a
+   new-grad SDE there is widely understood to clear the floor.
+4. DOMAIN column: ALWAYS fill the company's real primary domain - it's what makes
+   email discovery possible. This is required for every row.
+5. APPLY_URL: fill it when you can (nice to have), but for this tool the
+   email/domain matter more than the portal link.
+6. Freshness: prefer roles that look currently open.
+
+OUTPUT (strict)
+Return ONLY a CSV inside one code block - no prose, no commentary, no questions.
+Exact headers, in this order:
+
+company,role,email,domain,location,salary,apply_url,verified
+
+Give me [20] rows, EVERY one an email-reachable company meeting the salary floor,
+EVERY one with a real `domain`. Fill `email` wherever you genuinely found one;
+blank-with-verified=no is fine for the rest. Do NOT include a single big-tech /
+ATS-only company.
+
+============================================================
+HOW TO USE THE OUTPUT
+1. Copy the CSV from the code block.
+2. Paste into Notepad -> File > Save As > jobs.csv
+   (set "Save as type" to All files so it isn't saved as jobs.csv.txt).
+3. Dashboard -> "Import from file" panel -> drop jobs.csv -> Import file.
+4. Run (2) Find Contacts -> (3) Draft -> (4) Review & Send -> (5) Scan.
+   Salary shows on the Applications tracker page.
+
+Notes:
+- Because every row is a real-domain startup, (2) Find Contacts can discover +
+  verify a human email even when the `email` cell is blank - then it flows to
+  drafting and the actual emailer. THIS is the point of the new list.
+- verified=yes skips Hunter and is allowed to send directly (use sparingly).
+- Warm-up cap is 5/day for the first 3 days, so ~20 rows is plenty to start.
+============================================================

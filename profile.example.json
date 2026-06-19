@@ -1,0 +1,22 @@
+{
+  "full_name": "Your Name",
+  "email": "you@example.com",
+  "phone": "+91XXXXXXXXXX",
+  "city": "Delhi",
+  "college": "Your College / University",
+  "degree": "B.Tech (CSE)",
+  "graduation_year": "2026",
+  "batch": "2026",
+  "cv_url": "https://drive.google.com/file/d/.../view  (a PUBLIC resume link)",
+  "linkedin": "https://www.linkedin.com/in/your-handle",
+  "github": "https://github.com/your-handle",
+  "leetcode": "https://leetcode.com/your-handle",
+  "portfolio": "",
+  "years_experience": "0",
+  "expected_stipend": "50000",
+  "current_ctc": "Fresher",
+  "notice_period": "Immediate",
+  "willing_to_relocate": "Yes",
+  "gender": "",
+  "extra_notes": "One or two lines about your background for open-ended questions."
+}

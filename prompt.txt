@@ -1,0 +1,3 @@
+Re-read docs/04-Technical-Spec.md and the current code, tell me what's done vs remaining
+against the todo, then continue with the next button as a full vertical slice. Stop after
+it for me to test. Keep all anti-ban constraints intact.

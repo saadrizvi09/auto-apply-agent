@@ -1,0 +1,31 @@
+# Secrets & local-only artifacts (NEVER commit)
+.env
+credentials.json
+token.json
+jobs.db
+cv.pdf
+profile.json
+*.log
+
+# Personal data (resume PDFs, scraped job/contact data, cover letter)
+*.pdf
+jobs.csv
+cover_letter.txt
+
+# Form-filler browser session (your Google login) + screenshots
+.browser_profile/
+form_shots/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
