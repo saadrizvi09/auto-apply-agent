@@ -1,12 +1,13 @@
-# AutoApply — Free Job-Application Emailer
+# AutoApply
 
 A locally-run, single-user tool that **finds live remote engineering roles on LinkedIn**,
 resolves an HR/recruiter email for each (via Hunter.io), drafts a tailored application
 email, and sends it with your PDF CV attached — under strict anti-ban controls — then
 scans replies to track status. It also ingests "Referral Alert" digest emails and
 **auto-fills their Google Forms** using pre-filled links you open in your own logged-in
-browser, and **assists LinkedIn Easy Apply** by pre-filling the application for you to
-review and submit.
+browser, and applies on **LinkedIn Easy Apply** — either **assisted** (pre-fill, you
+submit) or **fully autonomous** (it submits end-to-end up to a daily cap). The LinkedIn
+apply queue **prioritises "urgent / immediate hiring" posts first**.
 
 **Local only.** Binds to `127.0.0.1`. No cloud, no public exposure. All secrets stay
 on your machine. Built on free service tiers.
@@ -31,7 +32,9 @@ The dashboard is five buttons, run left to right:
 **Plus:** bulk **Import from file** (CSV/Excel), a **Paste & apply** box for any email
 or form dump, **résumé autofill** of your profile from `cv.pdf`, **Google-Forms
 auto-apply** from referral digests (parse → pre-fill link → review → submit), and
-**assisted LinkedIn Easy Apply** (pre-fill → you submit).
+**LinkedIn Easy Apply** — **assisted** (pre-fill → you submit) or **autonomous**
+(submits end-to-end, urgent/hiring posts first), with a live **apply-queue** view and a
+**Stop** control.
 
 ## Find Jobs — how discovery works
 
@@ -132,10 +135,10 @@ pip install pytest
 pytest
 ```
 
-The suite (63 tests) locks the safety-critical logic before anything depends on it:
-email patterns, posting dedupe, ramp-cap, rolling bounce-rate (incl. min-sample),
-LinkedIn parsing + filters (salary / blocklist / seniority / headcount), referral
-parsing, and form-field mapping.
+The suite (79 tests) locks the safety-critical logic before anything depends on it:
+email patterns, posting dedupe, ramp-cap (send + LinkedIn), rolling bounce-rate (incl.
+min-sample), LinkedIn parsing + filters (salary / blocklist / seniority / headcount),
+urgency scoring + urgent-first queue ordering, referral parsing, and form-field mapping.
 
 ## Import contacts from a file (CSV / Excel)
 
@@ -205,34 +208,47 @@ py -3.11 formtool.py check                       # confirm login + read a form
 py -3.11 formtool.py read "<google-form-url>"    # print questions + planned answers
 ```
 
-## Apply on LinkedIn (assisted)
+## Apply on LinkedIn
 
-For LinkedIn jobs you found in ① Find Jobs, the **Apply on LinkedIn (assisted)** panel
-opens the **Easy Apply** flow in your own logged-in Chrome and **pre-fills** it — then
-**you review and click Submit**. It never auto-submits.
+For LinkedIn jobs you found in ① Find Jobs, the **Apply on LinkedIn** panel drives the
+**Easy Apply** flow in your own logged-in Chrome. It runs in two modes, and shows a live
+**apply-queue** of exactly which jobs it will work through — **urgent / immediate-hiring
+posts first**, then plain "hiring" posts, then newest. Each queued job carries a 🔥 Urgent
+or Hiring badge and a link to the posting.
 
-> **Why assisted, not fully automatic:** automating actions on your real LinkedIn account
-> violates LinkedIn's Terms and risks an account ban, and a hands-off bot would answer
-> screening questions wrong and submit irreversibly. So the safe, consistent design (same
-> as the Google-Forms flow) is pre-fill + human submit. Sensitive questions — work
-> authorization, visa sponsorship, citizenship, EEO/diversity, background — are
-> **deliberately left blank** for you to answer.
+| Mode | What it does |
+|---|---|
+| **Assisted** | Opens up to 10 matching jobs, **pre-fills** them, and holds the window — **you review and Submit**. Never auto-submits. |
+| **Auto-apply (autonomous)** | Submits to India-scope Easy-Apply jobs **end-to-end**, answering from your `profile.json` answer bank, up to the daily cap. **Skips (discards, never submits)** any job with a required question it can't answer safely, and **stops on a LinkedIn security check**. A **Stop** button halts it after the current job. |
+
+**Why urgent-first:** small companies put "Urgent Hiring" / "Immediate Joiner" in the job
+**title**, which the guest scraper can see; those listings move fastest, so the queue
+applies to them before anything else (detection is title-based — the low-ban-risk guest
+endpoint doesn't expose the full post body).
+
+> **Sensitive questions** — work authorization, visa sponsorship, citizenship,
+> EEO/diversity, background — are **deliberately left blank** in assisted mode; in
+> autonomous mode a job is **skipped** rather than guessed if such a field is required.
+> Automating your real LinkedIn account carries ban risk, so volume is capped and ramped.
 
 **One-time setup** — log into LinkedIn once in the same browser profile:
 ```powershell
 py -3.11 formtool.py lilogin     # log into LinkedIn, then close the window
 ```
 
-**Use it** — dashboard **Apply on LinkedIn** (opens up to 10 matching jobs at once), or:
+**Use it** — from the dashboard **Apply on LinkedIn** panel (**Assisted** or **Auto-apply**
+buttons), or from the CLI:
 ```powershell
-py -3.11 formtool.py liapply 10  # pre-fill up to 10 Easy-Apply jobs, hold for review
+py -3.11 formtool.py liapply 10  # assisted: pre-fill up to 10 Easy-Apply jobs, hold for review
+py -3.11 formtool.py liauto      # autonomous: submit up to the daily cap, urgent first
 ```
-In each tab: answer any highlighted screening questions, click Next (later steps auto-fill
-too), then **Submit yourself**. Non-Easy-Apply jobs are flagged to apply on the company site.
+The daily cap ramps with a warm-up (Day 1–2 → 8, Day 3–5 → 15, Day 6+ → `LI_DAILY_CAP`,
+default 30; ceiling 75). Non-Easy-Apply jobs are flagged to apply on the company site.
 
 > Best-effort: LinkedIn changes its page markup and detects automation, so start with a
 > small batch and watch for any "unusual activity" prompts. The safe-field mapping that
-> decides which questions to auto-answer is unit-tested; the page-driving is not.
+> decides which questions to auto-answer (and the urgency scoring) is unit-tested; the
+> page-driving is not. Run sparingly to keep ban risk low.
 
 ## Going live (real APIs + real sends)
 
@@ -272,22 +288,22 @@ app/
   main.py            FastAPI app, routes, static mount, scheduler lifecycle (127.0.0.1)
   config.py          .env loader + typed settings (DRY_RUN default on; WARMUP_RAMP; backup Groq key)
   db.py              SQLite engine, schema init + self-healing migrations, repository helpers
-  models.py          SQLModel models (companies[+salary,+headcount], contacts,
+  models.py          SQLModel models (companies[+salary,+headcount,+urgent], contacts,
                      applications[+apply_kind/form_*/email_cc/archived], send_log, settings)
-  logic.py           pure safety logic (patterns, dedupe, ramp cap, bounce rate + min-sample)
+  logic.py           pure safety logic (patterns, dedupe, ramp cap + li_ramp_cap, bounce rate + min-sample)
   logging_setup.py   structured autoapply.log
   profile.py         applicant profile loader (profile.json) for form-filling
   services/          discovery (LinkedIn+Hunter), contacts (Hunter back-fill), drafting (+intl pitch),
                      sender (anti-ban), replies, importer, resume (CV->profile),
                      referrals (digest parse), formfiller (Q->A map), forms (pre-fill orchestration),
-                     linkedin_apply (assisted Easy Apply: pre-fill, operator submits)
+                     linkedin_apply (Easy Apply: assisted pre-fill + autonomous auto-submit, urgent-first)
   integrations/      gmail, groq_client (+backup-key failover), hunter (verify + HR domain-search,
-                     multi-key rotation), linkedin (guest jobs scraper), cse (legacy),
-                     browser (Playwright/real Chrome: Google Forms + LinkedIn Easy Apply)
+                     multi-key rotation), linkedin (guest jobs scraper + urgency scoring), cse (legacy),
+                     browser (Playwright/real Chrome: Google Forms + LinkedIn assisted/autonomous Easy Apply)
   prompts.py         draft (India + international variants) + classify prompt templates
-formtool.py          CLI: Google/LinkedIn login + check / read / fill a form + liapply
+formtool.py          CLI: Google/LinkedIn login + check / read / fill a form + liapply / liauto
 static/              index.html, app.js, referrals.js, styles.css  (dashboard)
-tests/               unit tests (63): pure logic + LinkedIn discovery + referral parse + form mapping
+tests/               unit tests (79): pure logic + LinkedIn discovery + urgency/queue order + referral parse + form mapping
 ```
 
 See `docs/` for the full PRD, SRS, Architecture, Technical Spec, and Build Runbook.
