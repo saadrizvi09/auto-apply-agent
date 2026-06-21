@@ -322,6 +322,62 @@ async function runLiAutoApply(btn) {
   }
 }
 
+// ===== Other platforms: YC / Cutshort / ZipRecruiter ================
+
+const PLATFORM_LABEL = { yc: "Y Combinator", cutshort: "Cutshort", ziprecruiter: "ZipRecruiter" };
+
+async function runPlatformApply(platform, query, btn) {
+  const label = PLATFORM_LABEL[platform] || platform;
+  const nInput = document.querySelector(`[data-n="${platform}"]`);
+  const limit = nInput && nInput.value ? parseInt(nInput.value, 10) : null;
+  const howMany = limit ? `${limit} job(s)` : "up to the daily cap";
+  if (!confirm(
+    `AUTONOMOUS auto-apply on ${label} (${howMany}).\n\n` +
+    "It will SUBMIT applications on your behalf in your logged-in Chrome window, " +
+    "low-volume, and stop on any captcha/security check.\n\n" +
+    `⚠️ ${label} prohibits automation in its Terms — this can get the account restricted, ` +
+    "and submitted applications can't be undone. Make sure you ran " +
+    `\`formtool.py platlogin ${platform}\`. Continue?`
+  )) return;
+  busy(btn, true);
+  setStatus(`Auto-applying on ${label}… watch the window.`);
+  const box = document.querySelector(`[data-result="${platform}"]`);
+  if (box) { box.classList.remove("hidden"); box.textContent = "Running…"; }
+  try {
+    const res = await api("/api/platforms/autoapply", {
+      method: "POST",
+      body: JSON.stringify({ platform, query: query || "", remote: true, limit }),
+    });
+    setStatus(res.message || "Started.");
+  } catch (e) {
+    setStatus(`${label} auto-apply failed: ${e.message}`, true);
+    if (box) box.textContent = `Error: ${e.message}`;
+  } finally {
+    busy(btn, false);
+  }
+}
+
+function renderPlatformRun(run) {
+  if (!run || !run.platform) return;
+  const box = document.querySelector(`[data-result="${run.platform}"]`);
+  if (!box) return;
+  box.classList.remove("hidden");
+  if (run.running) {
+    box.innerHTML = '<span class="aac-spin"></span> Running… watch the Chrome window.';
+  } else if (run.result && run.result.message) {
+    const r = run.result;
+    const cls = r.captcha_stop ? "warn" : (r.submitted ? "ok" : "");
+    box.innerHTML = `<span class="aac-dot ${cls}"></span>${r.message}`;
+  }
+}
+
+async function refreshPlatforms() {
+  try {
+    const s = await api("/api/platforms/status");
+    if (s && s.run) renderPlatformRun(s.run);
+  } catch (_) { /* ignore */ }
+}
+
 async function runStage(btn, path, busyLabel) {
   busy(btn, true);
   setStatus(busyLabel);
@@ -522,6 +578,15 @@ function wireButtons() {
   const liStop = $("btn-li-stop");
   if (liStop) liStop.addEventListener("click", stopLiAuto);
 
+  // Other-platform auto-apply buttons (YC / Cutshort / ZipRecruiter)
+  document.querySelectorAll(".aac-run").forEach((b) => {
+    b.addEventListener("click", () => {
+      const platform = b.getAttribute("data-run");
+      const input = document.querySelector(`[data-q="${platform}"]`);
+      runPlatformApply(platform, input ? input.value.trim() : "", b);
+    });
+  });
+
   // In-panel Find button mirrors pipeline step ①; Reset clears the filters.
   const findBtn = $("btn-find");
   if (findBtn) findBtn.addEventListener("click", () => runDiscover(findBtn));
@@ -532,4 +597,6 @@ function wireButtons() {
 wireButtons();
 wireDropzone();
 refresh();
+refreshPlatforms();
 setInterval(refresh, 5000);
+setInterval(refreshPlatforms, 5000);

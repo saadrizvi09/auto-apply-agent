@@ -635,3 +635,82 @@ td .cell-muted { color: var(--faint); }
   line-height: 1; display: flex; align-items: center; justify-content: center;
 }
 .form-x:hover { color: var(--red); border-color: var(--red); background: var(--red-bg); }
+
+/* ===== Auto-Apply Center ===== */
+.aac .panel-head { margin-bottom: 14px; }
+
+.aac-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(180deg, rgba(123, 92, 255, 0.05), var(--bg-1));
+  padding: 16px;
+  margin-bottom: 14px;
+}
+.aac-primary {
+  border-color: rgba(91, 140, 255, 0.4);
+  background: linear-gradient(180deg, rgba(91, 140, 255, 0.09), var(--bg-1));
+}
+.aac-card-head { display: flex; align-items: center; gap: 12px; }
+.aac-ico {
+  flex: none; width: 38px; height: 38px; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 0.95rem; color: #fff;
+}
+.aac-ico-li { background: #0a66c2; }
+.aac-ico-yc { background: #ff6b00; }
+.aac-ico-cs { background: #6d4aff; font-size: 0.8rem; }
+.aac-ico-zr { background: #1a9c4f; font-size: 0.78rem; }
+.aac-card-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.aac-card-title strong { font-size: 0.98rem; color: var(--text); }
+.aac-sub { font-size: 0.8rem; color: var(--muted); line-height: 1.35; }
+
+.aac-badge {
+  flex: none; margin-left: auto; font-size: 0.68rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 4px 9px; border-radius: 999px; border: 1px solid transparent; cursor: default;
+}
+.aac-badge-ok { color: var(--green); background: var(--green-bg); border-color: rgba(52, 211, 153, 0.3); }
+.aac-badge-warn { color: var(--amber); background: var(--amber-bg); border-color: rgba(251, 191, 36, 0.3); }
+.aac-badge-danger { color: var(--red); background: var(--red-bg); border-color: rgba(248, 113, 113, 0.3); }
+.aac-card-head .count-pill { flex: none; }
+.aac-primary .aac-badge { margin-left: auto; }
+
+.aac-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.aac-actions .btn-ghost.danger { color: var(--red); border-color: var(--red); }
+.aac-q {
+  flex: 1 1 160px; min-width: 130px;
+  background: var(--panel-2, var(--bg-0)); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 11px; font-size: 0.85rem;
+}
+.aac-q:focus { outline: none; border-color: var(--accent); }
+.aac-n {
+  flex: 0 0 56px; width: 56px;
+  background: var(--panel-2, var(--bg-0)); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 8px; font-size: 0.85rem; text-align: center;
+}
+.aac-n:focus { outline: none; border-color: var(--accent); }
+.aac-run { white-space: nowrap; }
+
+.aac-grid {
+  display: grid; gap: 14px; margin-bottom: 4px;
+  grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+}
+.aac-grid .aac-card { margin-bottom: 0; }
+
+.aac-result {
+  margin-top: 12px; font-size: 0.84rem; color: var(--text); line-height: 1.4;
+  padding: 10px 12px; border-radius: 8px;
+  background: var(--bg-0); border: 1px solid var(--border-soft);
+  display: flex; align-items: center; gap: 8px;
+}
+.aac-dot { flex: none; width: 8px; height: 8px; border-radius: 999px; background: var(--slate); }
+.aac-dot.ok { background: var(--green); box-shadow: 0 0 8px rgba(52, 211, 153, 0.6); }
+.aac-dot.warn { background: var(--amber); }
+.aac-spin {
+  flex: none; width: 13px; height: 13px; border-radius: 999px;
+  border: 2px solid var(--border); border-top-color: var(--accent);
+  display: inline-block; animation: aac-spin 0.7s linear infinite;
+}
+@keyframes aac-spin { to { transform: rotate(360deg); } }

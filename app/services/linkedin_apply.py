@@ -24,22 +24,30 @@ from ..integrations import browser
 from ..logic import li_ramp_cap
 from ..logging_setup import log_event
 from ..profile import load_profile
+from . import answer_bank
 
-# Location markers that count as India / remote-India (the only scope we auto-apply to).
+# Location markers that count as India.
 _INDIA = (
     "india", "delhi", "ncr", "gurgaon", "gurugram", "noida", "bengaluru", "bangalore",
-    "mumbai", "hyderabad", "pune", "chennai", "kolkata", "ahmedabad", "remote",
+    "mumbai", "hyderabad", "pune", "chennai", "kolkata", "ahmedabad",
 )
+# Remote / location-agnostic markers — doable from India, so in scope regardless of country.
+_REMOTE = ("remote", "anywhere", "work from home", "wfh", "distributed")
 
 
-def _is_india_scope(job: dict) -> bool:
+def _in_apply_scope(job: dict) -> bool:
+    """True if the agent should auto-apply: India-located OR remote/global roles (which
+    can be done from India). On-site foreign roles are skipped. For a remote-but-foreign
+    role that still requires local work-authorisation, the work-auth answer ('No' for a
+    foreign country) truthfully filters it out inside the Easy-Apply flow."""
     loc = (job.get("location") or "").lower()
     if not loc:
         return True  # unknown location — let the agent's work-auth answer decide
+    if any(m in loc for m in _REMOTE):
+        return True  # remote / global — in scope even if a country is also named
     if any(c in loc for c in ("united states", "u.s.", "usa", "united kingdom", " uk ",
                               "germany", "europe", "canada", "australia", "singapore")):
-        # explicitly foreign and not remote-India
-        return "india" in loc
+        return "india" in loc  # explicitly foreign on-site — only if it also lists India
     return any(m in loc for m in _INDIA)
 
 
@@ -73,7 +81,7 @@ def autoapply() -> dict:
         cap = _li_cap_today(session)
         used = _li_used_today(session)
         remaining = max(0, cap - used)
-        jobs = [j for j in linkedin_jobs(session, 300) if _is_india_scope(j)]
+        jobs = [j for j in linkedin_jobs(session, 300) if _in_apply_scope(j)]
         urgent_queued = sum(1 for j in jobs[:remaining] if j.get("urgent"))
 
     if remaining <= 0:
@@ -89,9 +97,12 @@ def autoapply() -> dict:
         return {"ok": True, "submitted": 0, "dry_run": True,
                 "message": f"DRY RUN — would auto-apply to up to {len(jobs)} job(s) (cap {cap}/day)."}
 
+    bank_before = answer_bank.count()
     results = browser.linkedin_autoapply_session(jobs, profile, max_apply=remaining)
+    learned = max(0, answer_bank.count() - bank_before)
 
     submitted = [r for r in results if r.get("outcome") == "submitted"]
+    ext_submitted = [r for r in submitted if r.get("external")]
     skipped = [r for r in results if str(r.get("outcome", "")).startswith("skipped")]
     captcha = any(r.get("outcome") == "captcha_stop" for r in results)
     needs_login = any(r.get("outcome") == "needs_login" for r in results)
@@ -103,7 +114,8 @@ def autoapply() -> dict:
         for r in results:
             oc = r.get("outcome", "")
             if oc == "submitted":
-                set_li_status(session, r["id"], "li_applied", "auto-applied via LinkedIn Easy Apply")
+                how = "company ATS site" if r.get("external") else "LinkedIn Easy Apply"
+                set_li_status(session, r["id"], "li_applied", f"auto-applied via {how}")
             elif oc == "external":
                 set_li_status(session, r["id"], "li_external", "external apply — do on company site")
             elif str(oc).startswith("skipped"):
@@ -117,11 +129,15 @@ def autoapply() -> dict:
     else:
         urgent_note = (f" Prioritised {urgent_queued} urgent/hiring post(s) first."
                        if urgent_queued else "")
+        learned_note = (f" Learned {learned} new answer(s) for next time." if learned else "")
+        ext_note = (f" {len(ext_submitted)} of those were on company ATS sites."
+                    if ext_submitted else "")
         msg = (f"Auto-applied to {len(submitted)} job(s); skipped {len(skipped)} "
-               f"(unanswerable questions — listed for manual). Daily cap {cap}.{urgent_note}")
+               f"(unanswerable/incomplete — listed for manual). Daily cap {cap}."
+               f"{ext_note}{urgent_note}{learned_note}")
     log_event("li_autoapply", "batch", "ok", msg)
     return {"ok": True, "submitted": len(submitted), "skipped": len(skipped),
-            "captcha_stop": captcha, "message": msg}
+            "learned": learned, "captcha_stop": captcha, "message": msg}
 
 
 def list_targets(limit: int = 10) -> dict:
@@ -146,7 +162,9 @@ def apply_assisted(limit: int = 10) -> dict:
         return {"ok": True, "count": len(jobs), "dry_run": True,
                 "message": f"DRY RUN — would open {len(jobs)} Easy-Apply job(s) and pre-fill them."}
 
+    bank_before = answer_bank.count()
     results = browser.linkedin_apply_session(jobs, profile)
+    learned = max(0, answer_bank.count() - bank_before)
 
     easy = sum(1 for r in results if r.get("easy_apply"))
     external = sum(1 for r in results if r.get("external"))
@@ -169,8 +187,10 @@ def apply_assisted(limit: int = 10) -> dict:
         msg = ("Not logged into LinkedIn. Run:  py -3.11 formtool.py lilogin  "
                "(log in, close the window), then try again.")
     else:
+        learned_note = (f" Learned {learned} answer(s) from your inputs for future auto-apply."
+                        if learned else "")
         msg = (f"Opened {easy} Easy-Apply job(s) pre-filled — review + Submit in the browser. "
-               f"{external} are external-apply (do those on the company site).")
+               f"{external} are external-apply (do those on the company site).{learned_note}")
     log_event("li_apply", "batch", "ok", msg)
-    return {"ok": True, "count": len(jobs), "easy_apply": easy,
-            "external": external, "needs_login": needs_login, "message": msg}
+    return {"ok": True, "count": len(jobs), "easy_apply": easy, "external": external,
+            "learned": learned, "needs_login": needs_login, "message": msg}

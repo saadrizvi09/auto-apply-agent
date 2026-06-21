@@ -232,27 +232,99 @@
       </button>
     </section>
 
-    <!-- ===== Assisted LinkedIn Easy Apply ===== -->
-    <section class="panel">
+    <!-- ===== Auto-Apply Center ===== -->
+    <section class="panel aac">
       <div class="panel-head">
-        <h2>Apply on LinkedIn (assisted)</h2>
-        <span class="panel-hint">Opens Easy-Apply jobs in your logged-in Chrome, pre-fills them — you review + Submit. Never auto-submits.</span>
-        <span class="spacer"></span>
-        <span id="li-count" class="count-pill">0</span>
-        <button id="btn-li-apply" type="button" class="btn-ghost">Assisted (you submit)</button>
-        <button id="btn-li-stop" type="button" class="btn-ghost hidden" style="color:var(--danger,#e5534b);border-color:var(--danger,#e5534b)">Stop</button>
-        <button id="btn-li-auto" type="button" class="btn-find">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20.45 20.45h-3.56v-5.57c0-1.33-.02-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.35V9h3.41v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.13 2.06 2.06 0 0 1 0 4.13zM7.12 20.45H3.56V9h3.56v11.45zM22.22 0H1.77C.79 0 0 .77 0 1.73v20.54C0 23.22.79 24 1.77 24h20.45c.98 0 1.78-.78 1.78-1.73V1.73C24 .77 23.2 0 22.22 0z"/></svg>
-          Auto-apply (autonomous)
-        </button>
+        <h2>Auto-Apply Center</h2>
+        <span class="panel-hint">Autonomous applying across channels. Everything runs in your own logged-in Chrome and stops on any security check.</span>
       </div>
-      <div id="li-result" class="find-summary hidden"></div>
-      <div id="li-queue" class="li-queue"></div>
+
+      <!-- LinkedIn + Company ATS (the primary, most reliable channel) -->
+      <div class="aac-card aac-primary">
+        <div class="aac-card-head">
+          <span class="aac-ico aac-ico-li">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M20.45 20.45h-3.56v-5.57c0-1.33-.02-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.35V9h3.41v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.13 2.06 2.06 0 0 1 0 4.13zM7.12 20.45H3.56V9h3.56v11.45zM22.22 0H1.77C.79 0 0 .77 0 1.73v20.54C0 23.22.79 24 1.77 24h20.45c.98 0 1.78-.78 1.78-1.73V1.73C24 .77 23.2 0 22.22 0z"/></svg>
+          </span>
+          <div class="aac-card-title">
+            <strong>LinkedIn + Company sites</strong>
+            <span class="aac-sub">Easy Apply <em>and</em> external ATS forms (Greenhouse · Lever · Ashby) auto-submitted end-to-end.</span>
+          </div>
+          <span class="aac-badge aac-badge-ok">Reliable</span>
+          <span id="li-count" class="count-pill">0</span>
+        </div>
+        <div class="aac-actions">
+          <button id="btn-li-apply" type="button" class="btn-ghost">Assisted (you submit)</button>
+          <button id="btn-li-stop" type="button" class="btn-ghost hidden danger">Stop</button>
+          <button id="btn-li-auto" type="button" class="btn-find">Auto-apply (autonomous)</button>
+        </div>
+        <div id="li-result" class="find-summary hidden"></div>
+        <div id="li-queue" class="li-queue"></div>
+        <p class="li-hint">
+          One-time: <code>py -3.11 formtool.py lilogin</code>. <b>Auto-apply</b> submits to India + remote Easy-Apply jobs
+          and, for non-Easy-Apply jobs, drives the company ATS form too — answering from your learning bank, skipping
+          anything it can't answer, and stopping on a security check. <b>Assisted</b> pre-fills and you submit.
+        </p>
+      </div>
+
+      <!-- Other platforms -->
+      <div class="aac-grid">
+
+        <div class="aac-card" data-platform="yc">
+          <div class="aac-card-head">
+            <span class="aac-ico aac-ico-yc">Y</span>
+            <div class="aac-card-title">
+              <strong>Y Combinator</strong>
+              <span class="aac-sub">Work at a Startup — applies with a per-company message.</span>
+            </div>
+            <span class="aac-badge aac-badge-warn" title="Automation is against the platform's ToS — account risk.">ToS risk</span>
+          </div>
+          <div class="aac-actions">
+            <input type="text" class="aac-q" data-q="yc" placeholder="role (e.g. ai ml engineer)" />
+            <input type="number" class="aac-n" data-n="yc" min="1" max="10" placeholder="#" title="How many to apply to (blank = daily cap)" />
+            <button type="button" class="btn-find aac-run" data-run="yc">Auto-apply</button>
+          </div>
+          <div class="aac-result hidden" data-result="yc"></div>
+        </div>
+
+        <div class="aac-card" data-platform="cutshort">
+          <div class="aac-card-head">
+            <span class="aac-ico aac-ico-cs">cs</span>
+            <div class="aac-card-title">
+              <strong>Cutshort</strong>
+              <span class="aac-sub">Message + screening. Video-interview jobs flagged manual.</span>
+            </div>
+            <span class="aac-badge aac-badge-warn" title="ToS-restricted + ~15/week cap + captcha.">ToS risk</span>
+          </div>
+          <div class="aac-actions">
+            <input type="text" class="aac-q" data-q="cutshort" placeholder="blank = all roles, or e.g. backend, fastapi" />
+            <input type="number" class="aac-n" data-n="cutshort" min="1" max="8" placeholder="#" title="How many to apply to (blank = daily cap)" />
+            <button type="button" class="btn-find aac-run" data-run="cutshort">Auto-apply</button>
+          </div>
+          <div class="aac-result hidden" data-result="cutshort"></div>
+        </div>
+
+        <div class="aac-card" data-platform="ziprecruiter">
+          <div class="aac-card-head">
+            <span class="aac-ico aac-ico-zr">ZR</span>
+            <div class="aac-card-title">
+              <strong>ZipRecruiter</strong>
+              <span class="aac-sub">1-Click only. Stops instantly on Press-&-Hold.</span>
+            </div>
+            <span class="aac-badge aac-badge-danger" title="PerimeterX — frequently blocked; not reliable.">Fragile</span>
+          </div>
+          <div class="aac-actions">
+            <input type="text" class="aac-q" data-q="ziprecruiter" placeholder="search (e.g. backend engineer)" />
+            <input type="number" class="aac-n" data-n="ziprecruiter" min="1" max="5" placeholder="#" title="How many to apply to (blank = daily cap)" />
+            <button type="button" class="btn-find aac-run" data-run="ziprecruiter">Auto-apply</button>
+          </div>
+          <div class="aac-result hidden" data-result="ziprecruiter"></div>
+        </div>
+
+      </div>
       <p class="li-hint">
-        One-time setup: <code>py -3.11 formtool.py lilogin</code> (log into LinkedIn, close the window).
-        <b>Auto-apply</b> submits to India Easy-Apply jobs end-to-end (answer bank from your profile),
-        <b>skips</b> any job with a question it can't answer, and <b>stops on a LinkedIn security check</b>.
-        Daily cap ramps to <code>LI_DAILY_CAP</code> (default 30). <b>Assisted</b> just pre-fills and you submit.
+        Each platform needs a one-time login: <code>py -3.11 formtool.py platlogin &lt;yc|cutshort|ziprecruiter&gt;</code>.
+        These three <b>prohibit automation in their ToS</b> (account risk you've accepted) — every run is low-volume and
+        <b>stops on any captcha/security check</b>. First runs validate the page layout live.
       </p>
     </section>
 

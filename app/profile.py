@@ -41,6 +41,7 @@ DEFAULTS: dict[str, str] = {
     "expected_ctc_number": "",     # numeric salary expectation (for number-only fields)
     "current_ctc": "",
     "notice_period": "",
+    "currently_working": "Yes",   # answer to "are you currently working?" (interning counts)
     "willing_to_relocate": "Yes",
     # Answer bank for autonomous LinkedIn apply (India scope)
     "work_authorized_in": "India",

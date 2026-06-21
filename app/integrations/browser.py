@@ -11,6 +11,7 @@ only does that after operator approval. Sync API on purpose: call it from a sync
 from __future__ import annotations
 
 import os
+import random as _random
 from contextlib import contextmanager
 
 from ..config import ROOT, settings
@@ -114,8 +115,17 @@ def _context(headless: bool | None = None):
     try:
         yield ctx
     finally:
-        ctx.close()
-        pw.stop()
+        # The operator often closes the window by hand (login flows wait for that), which
+        # already tears down the context — so ctx.close() would raise TargetClosedError.
+        # Swallow it; the persistent session is saved as you browse, before the close.
+        try:
+            ctx.close()
+        except Exception:
+            pass
+        try:
+            pw.stop()
+        except Exception:
+            pass
 
 
 def launch_login() -> None:
@@ -694,10 +704,102 @@ def _li_radio_answer(question: str, p: dict) -> str | None:
         return p.get("gender")
     if "relocat" in low:
         return p.get("willing_to_relocate") or "Yes"
+    if has("currently working", "currently employed", "presently working",
+           "are you working", "currently in a job", "working professional"):
+        return p.get("currently_working", "Yes")
+    if has("notice"):
+        return p.get("notice_period") or "Immediate"
     if has("remote", "work from home", "comfortable", "willing", "able to",
-           "available", "immediately", "start", "notice", "agree", "acknowledge"):
+           "available", "immediately", "start", "agree", "acknowledge"):
         return "Yes"
     return None
+
+
+# --- answer resolution: static profile map -> learned bank -> LLM (skip if unsure) ---
+#
+# These wrap the static maps above with the learning answer-bank and an LLM fallback
+# (app/services/answer_bank.py). Sensitive self-ID questions are NEVER auto-answered
+# here (they return None, so a required one makes the agent skip the job). Any answer
+# the LLM produces is banked, so the same question is answered instantly next time.
+
+def _li_resolve_text(label: str, p: dict, options: list[str] | None = None) -> str | None:
+    """Resolve a text/select field's answer. None => leave blank / skip the job."""
+    low = (label or "").lower()
+    if not low or any(k in low for k in _LI_SENSITIVE):
+        return None
+    val = _li_value_for(label, p)              # 1. static profile map (fast, exact)
+    if val:
+        return str(val)
+    from ..services import answer_bank
+    banked = answer_bank.get(label)            # 2. previously learned
+    if banked:
+        return banked
+    ans = answer_bank.llm_answer(label, p, options=options)   # 3. LLM (truthful or UNKNOWN)
+    if ans:
+        answer_bank.remember(label, ans)
+    return ans
+
+
+def _li_resolve_choice(question: str, p: dict, options: list[str]) -> str | None:
+    """Resolve a radio / multiple-choice answer, constrained to `options`."""
+    low = (question or "").lower()
+    if not low or any(k in low for k in _LI_SENSITIVE):
+        return None
+    val = _li_radio_answer(question, p)        # 1. static map (Yes/No heuristics)
+    if val:
+        return str(val)
+    from ..services import answer_bank
+    banked = answer_bank.get(question)         # 2. learned
+    if banked:
+        return banked
+    ans = answer_bank.llm_answer(question, p, options=options)   # 3. LLM
+    if ans:
+        answer_bank.remember(question, ans)
+    return ans
+
+
+def _human_fill(el, text: str, page) -> None:
+    """Type like a human: focus, clear any prefill, then type per-character with a
+    small randomised delay. Falls back to fill() if typing isn't supported. This
+    avoids the instant-paste fingerprint that LinkedIn's automation detection flags."""
+    try:
+        el.click()
+        page.wait_for_timeout(int(_random.uniform(120, 360)))
+        try:
+            el.fill("")
+        except Exception:
+            pass
+        el.type(str(text), delay=_random.uniform(45, 130))
+    except Exception:
+        try:
+            el.fill(str(text))
+        except Exception:
+            pass
+
+
+def _human_dwell(page) -> None:
+    """A little human-like activity before acting: small mouse move + short scroll,
+    randomised timing. Cheap signal against 'humanly impossible' linear automation."""
+    try:
+        page.mouse.move(_random.uniform(120, 700), _random.uniform(120, 500),
+                        steps=_random.randint(3, 9))
+        page.wait_for_timeout(int(_random.uniform(400, 1300)))
+        page.mouse.wheel(0, _random.uniform(200, 600))
+        page.wait_for_timeout(int(_random.uniform(500, 1600)))
+    except Exception:
+        pass
+
+
+def _li_learnable(label: str, p: dict, is_choice: bool = False) -> bool:
+    """True if an operator's own answer to this question SHOULD be banked from an
+    assisted run: it's a real question, NOT a sensitive self-ID one (never learn those),
+    and the static profile map doesn't already cover it (so we only learn the custom
+    screening questions worth remembering)."""
+    low = (label or "").lower()
+    if not low or any(k in low for k in _LI_SENSITIVE):
+        return False
+    static = _li_radio_answer(label, p) if is_choice else _li_value_for(label, p)
+    return static is None
 
 
 def _li_label_for(modal, el) -> str:
@@ -734,10 +836,10 @@ def _fill_linkedin_modal(page, p: dict) -> tuple[int, int, bool]:
                 continue
         except Exception:
             continue
-        val = _li_value_for(label, p)
+        val = _li_resolve_text(label, p)
         if val:
             try:
-                inp.fill(str(val))
+                _human_fill(inp, str(val), page)
                 filled += 1
                 # Location is a typeahead — pick the dropdown suggestion, else
                 # LinkedIn shows "Please enter a valid answer" for raw text.
@@ -759,7 +861,12 @@ def _fill_linkedin_modal(page, p: dict) -> tuple[int, int, bool]:
         if not label:
             continue
         total += 1
-        val = _li_value_for(label, p)
+        try:
+            sel_opts = [(o.inner_text() or "").strip() for o in sel.query_selector_all("option")]
+            sel_opts = [o for o in sel_opts if o and o.lower() not in ("select an option", "")]
+        except Exception:
+            sel_opts = []
+        val = _li_resolve_text(label, p, options=sel_opts)
         if not val:
             continue
         try:
@@ -772,14 +879,17 @@ def _fill_linkedin_modal(page, p: dict) -> tuple[int, int, bool]:
             except Exception:
                 pass
 
-    # Yes/No radio fieldsets
+    # radio / multiple-choice fieldsets (Yes/No and custom option sets)
     for fs in modal.query_selector_all("fieldset"):
         legend = fs.query_selector("legend")
         q = (legend.inner_text() if legend else "").strip()
         if not q:
             continue
         total += 1
-        ans = _li_radio_answer(q, p)
+        fs_labels = [t for t in
+                     ((lab.inner_text() or "").strip() for lab in fs.query_selector_all("label"))
+                     if t]
+        ans = _li_resolve_choice(q, p, fs_labels)
         if not ans:
             continue
         for lab in fs.query_selector_all("label"):
@@ -803,6 +913,74 @@ def _fill_linkedin_modal(page, p: dict) -> tuple[int, int, bool]:
             except Exception:
                 pass
     return filled, total, attached
+
+
+def _capture_linkedin_answers(page, p: dict) -> int:
+    """Teach the bank from an ASSISTED run: read the operator's OWN answers out of the
+    visible Easy Apply modal and remember each non-sensitive screening question the static
+    profile map doesn't already cover. So next time the autonomous agent meets the same
+    question, it answers it instantly from the bank instead of skipping or guessing.
+
+    Idempotent and safe to call repeatedly from the keep-alive loop — `remember` only
+    writes on change, and the LATEST value wins, so the operator's final answer is what
+    persists (an intermediate half-typed value gets overwritten on the next pass). Returns
+    how many answers were captured this pass."""
+    modal = page.query_selector("div.jobs-easy-apply-modal") or page.query_selector('div[role="dialog"]')
+    if not modal:
+        return 0
+    from ..services import answer_bank
+    saved = 0
+
+    # text / tel / number inputs
+    for inp in modal.query_selector_all(
+        'input[type="text"], input[type="tel"], input[type="number"], input:not([type])'
+    ):
+        label = _li_label_for(modal, inp)
+        if not _li_learnable(label, p):
+            continue
+        try:
+            val = (inp.input_value() or "").strip()
+        except Exception:
+            continue
+        if val:
+            answer_bank.remember(label, val)
+            saved += 1
+
+    # native <select> dropdowns — read the chosen option's text
+    for sel in modal.query_selector_all("select"):
+        label = _li_label_for(modal, sel)
+        if not _li_learnable(label, p):
+            continue
+        try:
+            val = (sel.evaluate(
+                "e => e.options[e.selectedIndex] ? e.options[e.selectedIndex].text : ''"
+            ) or "").strip()
+        except Exception:
+            val = ""
+        if val and val.lower() not in ("select an option", "select"):
+            answer_bank.remember(label, val)
+            saved += 1
+
+    # radio / multiple-choice fieldsets — read the checked option's label
+    for fs in modal.query_selector_all("fieldset"):
+        legend = fs.query_selector("legend")
+        q = (legend.inner_text() if legend else "").strip()
+        if not _li_learnable(q, p, is_choice=True):
+            continue
+        chosen = ""
+        for radio in fs.query_selector_all('input[type="radio"]'):
+            try:
+                if radio.is_checked():
+                    rid = radio.get_attribute("id")
+                    lab = fs.query_selector(f'label[for="{rid}"]') if rid else None
+                    chosen = (lab.inner_text() if lab else "").strip()
+                    break
+            except Exception:
+                continue
+        if chosen:
+            answer_bank.remember(q, chosen)
+            saved += 1
+    return saved
 
 
 # --- Generic external-ATS application forms (Ashby / Greenhouse / Lever / …) -----
@@ -876,9 +1054,12 @@ def _ext_label_for(page, el) -> str:
         return ""
 
 
-def _fill_external_form(page, p: dict) -> tuple[int, int, bool]:
+def _fill_external_form(page, p: dict, upload_cv: bool = True) -> tuple[int, int, bool]:
     """Pre-fill a generic ATS application form (only empty, safe fields). Idempotent,
-    never submits. Returns (filled_now, total, resume_attached)."""
+    never submits. Returns (filled_now, total, resume_attached).
+
+    upload_cv=False skips the file upload — used for sites that attach the résumé from a
+    saved profile (e.g. Cutshort's Talent Card), where re-uploading cv.pdf just errors."""
     filled = total = 0
     for el in page.query_selector_all(
         'input[type="text"], input[type="email"], input[type="tel"], input[type="url"], '
@@ -893,10 +1074,10 @@ def _fill_external_form(page, p: dict) -> tuple[int, int, bool]:
         if not label:
             continue
         total += 1
-        val = _li_value_for(label, p)
+        val = _li_resolve_text(label, p)
         if val:
             try:
-                el.fill(str(val))
+                _human_fill(el, str(val), page)
                 filled += 1
             except Exception:
                 pass
@@ -907,7 +1088,13 @@ def _fill_external_form(page, p: dict) -> tuple[int, int, bool]:
                 continue
         except Exception:
             continue
-        val = _li_value_for(_ext_label_for(page, sel), p)
+        s_label = _ext_label_for(page, sel)
+        try:
+            s_opts = [(o.inner_text() or "").strip() for o in sel.query_selector_all("option")]
+            s_opts = [o for o in s_opts if o and o.lower() not in ("select an option", "select", "")]
+        except Exception:
+            s_opts = []
+        val = _li_resolve_text(s_label, p, options=s_opts)
         if not val:
             continue
         try:
@@ -920,9 +1107,31 @@ def _fill_external_form(page, p: dict) -> tuple[int, int, bool]:
             except Exception:
                 pass
 
+    # radio / multiple-choice fieldsets (e.g. "Are you currently working?" Yes/No)
+    for fs in page.query_selector_all("fieldset"):
+        try:
+            legend = fs.query_selector("legend")
+            q = (legend.inner_text() if legend else "").strip()
+            if not q:
+                continue
+            total += 1
+            labels = [t for t in
+                      ((lab.inner_text() or "").strip() for lab in fs.query_selector_all("label"))
+                      if t]
+            ans = _li_resolve_choice(q, p, labels)
+            if not ans:
+                continue
+            for lab in fs.query_selector_all("label"):
+                if ans.lower() in ((lab.inner_text() or "").strip().lower()):
+                    lab.click()
+                    filled += 1
+                    break
+        except Exception:
+            continue
+
     attached = False
     cv = _cv_abspath()
-    if cv:
+    if upload_cv and cv:
         for fi in page.query_selector_all('input[type="file"]'):
             try:
                 fi.set_input_files(cv)
@@ -931,6 +1140,198 @@ def _fill_external_form(page, p: dict) -> tuple[int, int, bool]:
             except Exception:
                 continue
     return filled, total, attached
+
+
+# === Autonomous external-ATS auto-submit (Greenhouse / Lever / Ashby / …) ==========
+#
+# Drives a generic company-ATS application form to SUBMISSION. Reuses the same answer
+# resolver + bank + CV upload as Easy Apply. Research-driven safety rules:
+#  - Upload the resume FIRST, then fill — every ATS parses the resume on upload and can
+#    async-overwrite typed name/email (the "parse race").
+#  - SUBMIT only when no required field is left unanswered (else leave it for assisted).
+#  - VERIFY a confirmation page/text — Greenhouse/Lever/Ashby run an INVISIBLE captcha at
+#    submit, which can make the click silently fail. Never trust the click alone.
+#  - STOP the whole run on a visible bot-wall (Cloudflare / PerimeterX press-and-hold).
+
+_ATS_BLOCK_MARKERS = (
+    "press & hold", "press and hold", "verify you are human", "verify you're human",
+    "are you a robot", "complete the security check", "checking your browser",
+    "unusual traffic", "access denied",
+)
+_ATS_SUCCESS_MARKERS = (
+    "thank you for applying", "application submitted", "thanks for applying",
+    "your application has been submitted", "we received your application",
+    "application received", "successfully submitted", "submission received",
+)
+
+
+def _ats_is_blocked(page) -> bool:
+    """A VISIBLE bot-wall (Cloudflare challenge / PerimeterX press-and-hold). The invisible
+    reCAPTCHA/hCaptcha badge present on most ATS forms is NOT a block — don't flag it."""
+    try:
+        u = (page.url or "").lower()
+        if any(s in u for s in ("/cdn-cgi/challenge", "px-captcha", "/_human", "perimeterx")):
+            return True
+        body = (page.inner_text("body") or "").lower()
+        return any(s in body for s in _ATS_BLOCK_MARKERS)
+    except Exception:
+        return False
+
+
+def _ext_submit_button(page):
+    """The submit control on an ATS form, most-specific first. Skips disabled buttons."""
+    for sel in ('button:has-text("Submit application")',
+                'button:has-text("Submit Application")',
+                '#btn-submit', '[data-qa="btn-submit"]',
+                'button[aria-label*="Submit" i]',
+                'button[type="submit"]', 'input[type="submit"]',
+                'button:has-text("Submit")'):
+        try:
+            el = page.query_selector(sel)
+            if el and el.is_visible() and el.get_attribute("disabled") is None \
+                    and (el.get_attribute("aria-disabled") or "false") != "true":
+                return el
+        except Exception:
+            continue
+    return None
+
+
+def _ext_missing_required(page) -> int:
+    """Count visible required text/select fields still empty, plus any field flagged
+    aria-invalid after a submit attempt. Resume file inputs are excluded (handled by the
+    upload step). Used to refuse submitting an incomplete application."""
+    n = 0
+    try:
+        for el in page.query_selector_all('[required], [aria-required="true"]'):
+            try:
+                if not el.is_visible():
+                    continue
+                if (el.get_attribute("type") or "").lower() == "file":
+                    continue
+                if not (el.input_value() or "").strip():
+                    n += 1
+            except Exception:
+                continue
+        n += len(page.query_selector_all('[aria-invalid="true"]'))
+    except Exception:
+        pass
+    return n
+
+
+def _ext_submitted(page, before_url: str) -> bool:
+    """True once the ATS shows a confirmation (URL or page text). SPA forms (Ashby)
+    confirm via text with no navigation, so check both."""
+    try:
+        u = (page.url or "").lower()
+        if u != (before_url or "").lower() and any(
+            s in u for s in ("confirmation", "thank", "submitted", "success", "complete", "applied")
+        ):
+            return True
+        body = (page.inner_text("body") or "").lower()
+        return any(s in body for s in _ATS_SUCCESS_MARKERS)
+    except Exception:
+        return False
+
+
+def _external_autosubmit(page, p: dict) -> str:
+    """Drive a generic ATS apply form to submission. Returns:
+    'submitted' | 'skipped:<reason>' | 'captcha_stop' | 'error:<msg>'."""
+    try:
+        page.wait_for_timeout(1800)
+        if _ats_is_blocked(page):
+            return "captcha_stop"
+        # 1. upload the CV FIRST (beat the resume parse-race), then let it settle
+        cv = _cv_abspath()
+        if cv:
+            for fi in page.query_selector_all('input[type="file"]'):
+                try:
+                    fi.set_input_files(cv)
+                    page.wait_for_timeout(3500)
+                    break
+                except Exception:
+                    continue
+        # 2. fill labelled fields via the resolver; two passes re-assert parser-overwrites
+        for _ in range(2):
+            _fill_external_form(page, p)
+            page.wait_for_timeout(700)
+        _human_dwell(page)
+        # 3. never submit an incomplete application — leave it for the assisted flow
+        if _ext_missing_required(page) > 0:
+            return "skipped:required-unanswered"
+        btn = _ext_submit_button(page)
+        if not btn:
+            return "skipped:no-submit-button"
+        before = page.url
+        try:
+            btn.click()
+        except Exception:
+            return "skipped:submit-click-failed"
+        # 4. confirm — the invisible captcha can silently eat the submit
+        for _ in range(14):
+            page.wait_for_timeout(1000)
+            if _ats_is_blocked(page):
+                return "captcha_stop"
+            if _ext_submitted(page, before):
+                return "submitted"
+            if _ext_missing_required(page) > 0:
+                return "skipped:validation-failed"
+        return "skipped:no-confirmation"
+    except Exception as e:  # noqa: BLE001
+        return f"error:{str(e)[:120]}"
+
+
+def _find_external_apply(page):
+    """The 'Apply' (on company website) control on a LinkedIn job page — it opens the
+    company ATS in a new tab. Returns the element, or None. Skips the Easy Apply button."""
+    for sel in ('button[aria-label*="Apply to" i]', 'a[aria-label*="Apply to" i]',
+                'button.jobs-apply-button', 'a.jobs-apply-button',
+                'a:has-text("Apply")', 'button:has-text("Apply")'):
+        try:
+            el = page.query_selector(sel)
+            if el and el.is_visible():
+                blob = ((el.inner_text() or "") + " " + (el.get_attribute("aria-label") or "")).lower()
+                if "easy apply" in blob:
+                    continue
+                if "apply" in blob:
+                    return el
+        except Exception:
+            continue
+    return None
+
+
+def _external_apply_flow(ctx, page, p: dict) -> str:
+    """From a LinkedIn job page that is NOT Easy Apply: click 'Apply' (opens the company
+    ATS in a new tab), then auto-submit that ATS form. Returns the _external_autosubmit
+    outcome, or 'external' if we couldn't reach a fillable form (left for manual)."""
+    ext = _find_external_apply(page)
+    if not ext:
+        return "external"
+    atspage = None
+    try:
+        with ctx.expect_page(timeout=20_000) as pi:
+            ext.click()
+        atspage = pi.value
+        try:
+            atspage.wait_for_load_state("domcontentloaded", timeout=30_000)
+        except Exception:
+            pass
+        atspage.wait_for_timeout(1500)
+    except Exception:
+        atspage = page if _is_application_page(page) else None
+    if atspage is None or not _is_application_page(atspage):
+        if atspage is not None and atspage is not page:
+            try:
+                atspage.close()
+            except Exception:
+                pass
+        return "external"
+    outcome = _external_autosubmit(atspage, p)
+    if atspage is not page:
+        try:
+            atspage.close()
+        except Exception:
+            pass
+    return outcome
 
 
 def linkedin_apply_session(jobs: list[dict], profile: dict) -> list[dict]:
@@ -991,6 +1392,7 @@ def linkedin_apply_session(jobs: list[dict], profile: dict) -> list[dict]:
                                 continue
                             if "linkedin.com" in (page.url or "").lower():
                                 _fill_linkedin_modal(page, profile)
+                                _capture_linkedin_answers(page, profile)  # learn the operator's answers
                             elif _is_application_page(page):
                                 _fill_external_form(page, profile)
                         except Exception:
@@ -1009,8 +1411,6 @@ def linkedin_apply_session(jobs: list[dict], profile: dict) -> list[dict]:
 # and SUBMITS only when all required fields are satisfied. If a required question can't
 # be answered confidently, it DISCARDS that application (never submits a wrong/guessed
 # answer) and moves on. Stops the whole run if LinkedIn shows a captcha/checkpoint.
-
-import random as _random
 
 
 def _li_button(scope, *labels):
@@ -1147,6 +1547,8 @@ def _easy_apply_autosubmit(page, p: dict) -> str:
         return f"error:{str(e)[:120]}"
 
 
+# (random imported at top as _random)
+
 # Cooperative stop flag — set by /api/linkedin/stop, checked between jobs.
 _AUTOAPPLY_STOP = False
 
@@ -1173,7 +1575,8 @@ def _safe_goto(page, url: str) -> bool:
     return False
 
 
-def linkedin_autoapply_session(jobs: list[dict], profile: dict, max_apply: int = 30) -> list[dict]:
+def linkedin_autoapply_session(jobs: list[dict], profile: dict, max_apply: int = 30,
+                               external_submit: bool = True) -> list[dict]:
     """AUTONOMOUS: apply to up to `max_apply` Easy Apply jobs end-to-end (submits).
     Skips (discards) any job with an unanswerable required field. Stops on a LinkedIn
     captcha/checkpoint. Human-like delay between applications.
@@ -1207,6 +1610,7 @@ def linkedin_autoapply_session(jobs: list[dict], profile: dict, max_apply: int =
                         continue
                     consecutive_errors = 0
                     page.wait_for_timeout(1800)
+                    _human_dwell(page)   # read-the-posting mouse move + scroll (anti-ban)
                     if any(s in page.url.lower() for s in ("login", "authwall", "checkpoint")):
                         r["outcome"] = "needs_login"
                         results.append(r)
@@ -1218,23 +1622,41 @@ def linkedin_autoapply_session(jobs: list[dict], profile: dict, max_apply: int =
                         break  # STOP — do not push LinkedIn further
                     btn = _find_easy_apply(page)
                     if not btn:
-                        r["outcome"] = "external"
-                        results.append(r)
-                        continue
-                    btn.click()
-                    page.wait_for_selector('div.jobs-easy-apply-modal, div[role="dialog"]', timeout=15_000)
-                    page.wait_for_timeout(1000)
-                    r["outcome"] = _easy_apply_autosubmit(page, profile)
-                    if r["outcome"] == "submitted":
-                        applied += 1
-                    print(f"  -> {j.get('company')}: {r['outcome']}  ({applied}/{max_apply} submitted)")
+                        # Not Easy Apply → try the company ATS form (Greenhouse/Lever/Ashby).
+                        if external_submit:
+                            r["outcome"] = _external_apply_flow(ctx, page, profile)
+                            r["external"] = True
+                            if r["outcome"] == "submitted":
+                                applied += 1
+                            print(f"  -> {j.get('company')}: external {r['outcome']}  "
+                                  f"({applied}/{max_apply} submitted)")
+                            if r["outcome"] == "captcha_stop":
+                                results.append(r)
+                                log_event("browser", "li_autoapply", "captcha_stop",
+                                          "ATS bot-wall — stopping run")
+                                break  # STOP on a bot-wall, don't push further
+                        else:
+                            r["outcome"] = "external"
+                            print(f"  -> {j.get('company')}: external (auto-submit off)")
+                    else:
+                        btn.click()
+                        page.wait_for_selector('div.jobs-easy-apply-modal, div[role="dialog"]', timeout=15_000)
+                        page.wait_for_timeout(1000)
+                        r["outcome"] = _easy_apply_autosubmit(page, profile)
+                        if r["outcome"] == "submitted":
+                            applied += 1
+                        print(f"  -> {j.get('company')}: {r['outcome']}  ({applied}/{max_apply} submitted)")
                 except Exception as e:  # noqa: BLE001
                     r["outcome"] = "error"
                     r["error"] = str(e)[:150]
                     log_event("browser", "li_autoapply", "error", f"{j.get('company')}: {e}")
                 results.append(r)
-                # human-like pause between applications (anti-ban)
-                page.wait_for_timeout(int(_random.uniform(40_000, 95_000)))
+                # human-like pause between applications (anti-ban): non-linear, with an
+                # occasional longer "break" so the cadence never looks machine-regular.
+                pause = _random.uniform(40_000, 95_000)
+                if _random.random() < 0.15:
+                    pause += _random.uniform(60_000, 150_000)
+                page.wait_for_timeout(int(pause))
     except Exception as e:  # noqa: BLE001
         log_event("browser", "li_autoapply_session", "error", str(e))
     return results

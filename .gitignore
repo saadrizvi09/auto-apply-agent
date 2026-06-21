@@ -5,6 +5,8 @@ token.json
 jobs.db
 cv.pdf
 profile.json
+answer_bank.json
+platform_applied.json
 *.log
 
 # Personal data (resume PDFs, scraped job/contact data, cover letter)

@@ -29,6 +29,14 @@ Run these from the project root (the app server does NOT need to be running):
       Assisted LinkedIn Easy Apply: opens up to N matching jobs (default 10),
       pre-fills the safe fields, and HOLDS the window for you to review the
       screening questions and Submit. Never submits for you.
+
+  py -3.11 formtool.py platlogin <yc|cutshort|ziprecruiter>
+      One-time login for an external platform (same .browser_profile). Log in,
+      close the window. Required before that platform's auto-apply will work.
+
+  py -3.11 formtool.py platauto <yc|cutshort|ziprecruiter> [query]
+      AUTONOMOUS apply on that platform up to its daily cap. ToS-restricted +
+      bot-defended; it STOPS on any security check. Watch the window.
 """
 from __future__ import annotations
 
@@ -180,7 +188,61 @@ def cmd_liauto() -> None:
     print(res.get("message", ""))
 
 
+_PLATFORMS = ("yc", "cutshort", "ziprecruiter")
+
+
+def cmd_platlogin(platform: str) -> None:
+    """One-time login for an external platform (YC / Cutshort / ZipRecruiter)."""
+    from app.integrations import platforms
+    if platform not in _PLATFORMS:
+        print(f"Unknown platform '{platform}'. Use one of: {', '.join(_PLATFORMS)}")
+        return
+    platforms.launch_login(platform)
+    print(f"{platform} login saved to .browser_profile/")
+
+
+def cmd_platcheck(platform: str) -> None:
+    """Diagnostic login check: reports logged-in state, the landing URL, the reason, and
+    a screenshot path of what the bot saw. Never applies to anything."""
+    from app.integrations import platforms
+    if platform not in _PLATFORMS:
+        print(f"Unknown platform '{platform}'. Use one of: {', '.join(_PLATFORMS)}")
+        return
+    r = platforms.login_probe(platform)
+    state = "LOGGED IN" if r["logged_in"] else "NOT logged in"
+    print(f"{platform}: {state}")
+    print(f"  landed on : {r['url']}")
+    print(f"  reason    : {r['reason']}")
+    if r.get("shot"):
+        print(f"  screenshot: {r['shot']}  (open it to see what the bot sees)")
+    if not r["logged_in"]:
+        print(f"  -> if you ARE logged in there, this is a false negative — tell me the "
+              f"URL+reason above. Otherwise run:  py -3.11 formtool.py platlogin {platform}")
+
+
+def cmd_platauto(platform: str, args: list[str]) -> None:
+    """AUTONOMOUS apply on an external platform up to its daily cap.
+
+    A trailing integer caps this run (e.g. `platauto yc "ai ml engineer" 1` = try 1 job),
+    useful for a watched first-run validation."""
+    from app.services import platform_apply
+    if platform not in _PLATFORMS:
+        print(f"Unknown platform '{platform}'. Use one of: {', '.join(_PLATFORMS)}")
+        return
+    limit = None
+    toks = list(args)
+    if toks and toks[-1].isdigit():
+        limit = int(toks[-1])
+        toks = toks[:-1]
+    res = platform_apply.autoapply(platform, query=" ".join(toks), limit=limit)
+    print(res.get("message", ""))
+
+
 def main() -> None:
+    try:  # job titles can carry non-Latin chars the Windows cp1252 console can't encode
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     if len(sys.argv) < 2:
         print(__doc__)
         return
@@ -201,6 +263,12 @@ def main() -> None:
         cmd_liauto()
     elif cmd == "liapply":
         cmd_liapply(int(sys.argv[2]) if len(sys.argv) >= 3 else 10)
+    elif cmd == "platlogin" and len(sys.argv) >= 3:
+        cmd_platlogin(sys.argv[2].lower())
+    elif cmd == "platcheck" and len(sys.argv) >= 3:
+        cmd_platcheck(sys.argv[2].lower())
+    elif cmd == "platauto" and len(sys.argv) >= 3:
+        cmd_platauto(sys.argv[2].lower(), sys.argv[3:])
     elif cmd == "read" and len(sys.argv) >= 3:
         cmd_read(sys.argv[2])
     elif cmd == "fill" and len(sys.argv) >= 3:

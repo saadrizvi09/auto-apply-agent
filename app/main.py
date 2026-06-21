@@ -36,6 +36,7 @@ from .services import (
     forms,
     importer,
     linkedin_apply,
+    platform_apply,
     replies,
     resume,
     sender,
@@ -46,6 +47,8 @@ LAST_SEND: dict = {"running": False, "result": None}
 LAST_LI_APPLY: dict = {"running": False, "result": None}
 # Tracks the most recent background form-fill run.
 LAST_FILL: dict = {"running": False, "result": None}
+# Tracks the most recent background platform (YC/Cutshort/ZipRecruiter) apply run.
+LAST_PLATFORM: dict = {"running": False, "result": None, "platform": None}
 
 scheduler = BackgroundScheduler()
 
@@ -403,6 +406,52 @@ def api_linkedin_stop() -> dict:
     """Ask a running auto-apply to stop after the current job (cooperative)."""
     browser.request_autoapply_stop()
     return {"ok": True, "message": "Stop requested — the agent will halt after the current job."}
+
+
+# --- Other platforms: YC / Cutshort / ZipRecruiter (autonomous, fragile) ---------
+
+@app.get("/api/platforms/status")
+def api_platforms_status() -> dict:
+    """Login-session presence + today's per-platform apply counts."""
+    out = platform_apply.status()
+    out["run"] = LAST_PLATFORM
+    out["dry_run"] = settings.dry_run
+    return out
+
+
+class PlatformApply(BaseModel):
+    platform: str                 # yc | cutshort | ziprecruiter
+    query: str = ""               # role / skill / search keywords
+    location: str = ""            # ZipRecruiter location (e.g. "Remote")
+    remote: bool = True
+    limit: int | None = None      # cap this run (None = up to the daily cap)
+
+
+def _run_platform_apply(platform: str, query: str, location: str, remote: bool,
+                        limit: int | None) -> None:
+    LAST_PLATFORM["running"] = True
+    LAST_PLATFORM["platform"] = platform
+    try:
+        LAST_PLATFORM["result"] = platform_apply.autoapply(platform, query, location, remote, limit)
+    finally:
+        LAST_PLATFORM["running"] = False
+
+
+@app.post("/api/platforms/autoapply")
+def api_platforms_autoapply(req: PlatformApply, background: BackgroundTasks) -> dict:
+    """AUTONOMOUS apply on YC / Cutshort / ZipRecruiter (ToS-restricted; stops on any
+    bot-wall). Needs a one-time login via  formtool.py platlogin <platform>."""
+    if LAST_PLATFORM["running"]:
+        return {"started": False, "message": "A platform apply run is already in progress."}
+    if req.platform not in ("yc", "cutshort", "ziprecruiter"):
+        return {"started": False, "message": f"Unknown platform '{req.platform}'."}
+    limit = req.limit if (req.limit and req.limit > 0) else None
+    background.add_task(_run_platform_apply, req.platform, req.query, req.location,
+                        req.remote, limit)
+    cap_note = f"up to {limit}" if limit else "up to the daily cap"
+    return {"started": True,
+            "message": f"Auto-applying on {req.platform} ({cap_note}) in the background — "
+                       "watch the window; it stops on any security check."}
 
 
 @app.get("/api/profile")
