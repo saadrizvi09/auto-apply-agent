@@ -1,132 +1,204 @@
 # AutoApply
 
-A locally-run, single-user tool that **finds live remote engineering roles on LinkedIn**,
-resolves an HR/recruiter email for each (via Hunter.io), drafts a tailored application
-email, and sends it with your PDF CV attached — under strict anti-ban controls — then
-scans replies to track status. It also ingests "Referral Alert" digest emails and
-**auto-fills their Google Forms** using pre-filled links you open in your own logged-in
-browser, and applies on **LinkedIn Easy Apply** — either **assisted** (pre-fill, you
-submit) or **fully autonomous** (it submits end-to-end up to a daily cap). The LinkedIn
-apply queue **prioritises "urgent / immediate hiring" posts first**.
+A locally-run, single-user job-application agent. It **finds live engineering roles**,
+applies to them across multiple channels — **autonomously where it safely can**, assisted
+where it can't — and tracks every application. One dashboard drives:
 
-**Local only.** Binds to `127.0.0.1`. No cloud, no public exposure. All secrets stay
-on your machine. Built on free service tiers.
+- **Cold email outreach** — scrape LinkedIn for remote roles → resolve an HR/recruiter
+  email (Hunter.io) → draft a tailored email (Groq) → send with your CV attached under
+  strict anti-ban controls → scan replies to track status.
+- **Autonomous applying** — an **Auto-Apply Center** that submits applications end-to-end
+  on **LinkedIn Easy Apply**, **company ATS forms** (Greenhouse / Lever / Ashby),
+  **Y Combinator's Work at a Startup**, **Cutshort**, and **ZipRecruiter** — each in your
+  own logged-in Chrome, answering screening questions from a **learning answer bank**.
+- **Google-Forms auto-apply** — ingest "Referral Alert" digests and pre-fill their forms.
 
-> Supporting channel. Run alongside referrals and LinkedIn applications. Volume is
-> capped for deliverability safety — by design.
+**Local only.** Binds to `127.0.0.1`. No cloud, no public exposure. Every secret stays on
+your machine. Built on free service tiers.
+
+> **Honest disclaimer.** Automating applications on LinkedIn, YC, Cutshort and ZipRecruiter
+> is against those platforms' Terms of Service and can get an account restricted. This tool
+> runs on **your own machine, with your own logged-in session, at deliberately low volume**,
+> and **stops the moment it hits a captcha / security check** — but the risk is real and
+> yours to accept. Start small and watch the first runs.
 
 ---
 
-## The pipeline
+## How applying works (the three layers)
 
-The dashboard is five buttons, run left to right:
+Every autonomous channel shares the same engine:
 
-| # | Button | What it does now |
+1. **Static profile map** — name, email, phone, links, years of experience, work
+   authorization, notice period, etc. come straight from `profile.json` (instant).
+2. **Learning answer bank** (`answer_bank.json`) — every screening question the agent
+   answers is saved, keyed by the question text. The next time that question appears
+   (on any platform), it's answered instantly. Assisted runs also teach the bank from
+   *your* answers.
+3. **LLM fallback** (Groq) — anything the map and bank don't cover (open questions like
+   "why this role?", custom numeric/skill questions) is answered truthfully **from your
+   profile only**; if it can't answer honestly it replies `UNKNOWN` and the agent
+   **skips** the job rather than submit a guess.
+
+**Sensitive questions** — disability, veteran status, race, criminal history, salary
+range, citizenship — are **never auto-answered**. A required sensitive question makes the
+agent skip that job.
+
+## The email pipeline
+
+The dashboard's pipeline is five buttons, run left to right:
+
+| # | Button | What it does |
 |---|--------|------------------|
 | ① | **Find Jobs** | Scrapes LinkedIn's public guest job search (no login) for remote roles across your geos, filters out interns / over-senior titles / big-cos / large teams / low salary, and resolves HR emails via Hunter. |
-| ② | **Find Contacts** | Back-fills HR emails (Hunter, by company name) for any jobs that didn't get one during Find Jobs. |
+| ② | **Find Contacts** | Back-fills HR emails (Hunter, by company name) for jobs that didn't get one during Find Jobs. |
 | ③ | **Draft Emails** | One tailored Groq email per role (90–130 words, CV attached, no links in body). US/EU rows get a remote-from-India cost/quality pitch. |
 | ④ | **Review & Send** | You approve each draft; sending enforces every anti-ban rule (ramp, spacing, verify, dup guard, bounce auto-pause). |
 | ⑤ | **Scan Replies** | Classifies replies (interview / rejection / needs-info / auto-ack), detects bounces, labels in Gmail. Also runs hourly. |
 
-**Plus:** bulk **Import from file** (CSV/Excel), a **Paste & apply** box for any email
-or form dump, **résumé autofill** of your profile from `cv.pdf`, **Google-Forms
-auto-apply** from referral digests (parse → pre-fill link → review → submit), and
-**LinkedIn Easy Apply** — **assisted** (pre-fill → you submit) or **autonomous**
-(submits end-to-end, urgent/hiring posts first), with a live **apply-queue** view and a
-**Stop** control.
+**Plus:** bulk **Import from file** (CSV/Excel), a **Paste & apply** box for any email or
+form dump, **résumé autofill** of your profile from `cv.pdf`, and **Google-Forms
+auto-apply** from referral digests.
+
+## Auto-Apply Center
+
+The dashboard's Auto-Apply Center applies for you across channels. Each channel runs in
+your own logged-in Chrome, answers from the shared engine above, dedupes against an
+already-applied set (`platform_applied.json`), uses randomised human-like pacing, and
+**stops on any captcha / security check** rather than fighting it.
+
+| Channel | What it does | Status |
+|---|---|---|
+| **LinkedIn + Company sites** | Easy Apply end-to-end; for non-Easy-Apply jobs it drives the company **ATS form** (Greenhouse / Lever / Ashby) — uploads the CV, answers, and **submits only after verifying the confirmation page**. Urgent/hiring posts first. | **Reliable** |
+| **Y Combinator** (Work at a Startup) | Applies to startups with a **per-company, LLM-written message** (not templated — YC ignores generic blasts). Skips senior/exec roles. | ToS risk |
+| **Cutshort** | Sweeps multiple skills across **remote + your city**, applies with a cover message + screening answers, flags AI-video-interview jobs as manual. | ToS risk |
+| **ZipRecruiter** | 1-Click apply only; **stops instantly** on the PerimeterX press-&-hold wall (never auto-solves). Frequently blocked by design — treat as best-effort. | Fragile |
+
+Per-channel **count box** caps a single run; blank = the daily cap. Caps are
+env-overridable (`YC_DAILY_CAP=20`, `CUTSHORT_DAILY_CAP=12`, `ZIP_DAILY_CAP=6` by
+default; LinkedIn ramps to `LI_DAILY_CAP`).
+
+> **Why the channels differ.** LinkedIn Easy Apply and public ATS forms are the most
+> reliable. YC/Cutshort/ZipRecruiter are login-gated and bot-defended; ZipRecruiter's
+> PerimeterX is essentially unbeatable with a normal browser, so it's labelled *Fragile*
+> on purpose. Cutshort caps ~15 applies/week on its free tier regardless of your settings.
+
+## One-time logins
+
+Each channel needs a single manual login (the platforms block scripted sign-in). The
+session persists in `.browser_profile/` and is reused on every later run.
+
+```powershell
+py -3.11 formtool.py login                     # Google (for Google-Forms apply)
+py -3.11 formtool.py lilogin                    # LinkedIn
+py -3.11 formtool.py platlogin yc              # Y Combinator
+py -3.11 formtool.py platlogin cutshort        # Cutshort
+py -3.11 formtool.py platlogin ziprecruiter    # ZipRecruiter
+py -3.11 formtool.py platcheck <platform>      # verify a session is actually logged in
+```
 
 ## Find Jobs — how discovery works
 
 Find Jobs scrapes LinkedIn's **public guest endpoint**
 (`linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search`) — no account, lower ban
-risk than the authenticated site. Each result is filtered, stored, and (quota
-permitting) enriched with an HR email.
-
-**Filter inputs (dashboard "Find jobs" panel):**
+risk than the authenticated site. Each result is filtered, stored, and (quota permitting)
+enriched with an HR email.
 
 | Filter | Blank default | Effect |
 |---|---|---|
 | **Role** | `AI Agents Engineer`, `LLM Engineer`, `Backend Engineer` | LinkedIn keyword query (one search per role) |
-| **Location** | `India`, `United States`, `Germany` | searched per geo, remote-only |
+| **Location** | `India`, `United States`, `Germany` | searched per geo |
 | **Keywords** | — | extra terms appended to each role |
 | **Min LPA** | `8` | drops jobs whose salary is shown *and* below it (LinkedIn rarely shows salary, so unknowns are kept) |
 | **Max team size** | `500` | startup bias — drops companies whose Hunter headcount exceeds it |
 | **Remote only** | on | LinkedIn `f_WT=2` remote filter |
 
-**Always-on filters:** internships, over-senior titles (Staff / Principal / Director /
-VP / Head-of / Manager / Architect), and a blocklist of big enterprises, IT-services and
-staffing agencies are removed — so results skew to small, reachable startups. After each
-run a **results breakdown** shows how many were dropped by each filter.
+**Always-on filters:** internships, over-senior titles (Staff / Principal / Director / VP
+/ Head-of / Manager / Architect), and a blocklist of big enterprises, IT-services and
+staffing agencies are removed — so results skew to small, reachable startups. A results
+breakdown shows how many were dropped by each filter.
 
 > HR emails are **not** on LinkedIn — they come from Hunter's domain search (by company
-> name), filtered for recruiter/HR/talent roles. The legacy Google Custom Search path
-> (`discover_ats`) is retained as a fallback but is not used by default.
+> name), filtered for recruiter/HR/talent roles. The urgent/"immediate hiring" posts are
+> applied to first (title-based detection from the guest scraper).
 
-## Safety defaults (read before you run anything real)
+## Safety defaults (read before running anything real)
 
 - **`DRY_RUN=true` is the default.** Nothing is sent and no paid/quota API is called for
   real until you flip it off in `.env`.
 - The **first real send must go to a secondary inbox you control** — set
-  `FIRST_SEND_TEST_INBOX` in `.env`; real sending refuses any other recipient until one
-  real send has succeeded.
-- Every anti-ban rule is enforced before any send:
+  `FIRST_SEND_TEST_INBOX`; real sending refuses any other recipient until one real send
+  succeeds.
+- Every anti-ban rule is enforced before any email send:
   - **Ramping daily cap with warm-up** — Day 1–2 → 15, Day 3–5 → 30, Day 6+ → `DAILY_CAP`
-    (the ramp target you set in `.env`; shipped default 20, absolute ceiling 75). Set
-    `WARMUP_RAMP=false` to use the full cap from day 1.
-  - **Warm-up gate** — sending is blocked until the sender account is `MIN_ACCOUNT_AGE_DAYS` old.
-  - **Randomized 90–180 s delays** between sends (human-like spacing).
-  - **Verify-before-send** — unverified recipients are skipped, unless you explicitly
-    check them in Review & Send (a confirm dialog appears). Hunter-found emails are also
-    **mailbox-verified** right before sending (when Hunter quota remains); a definitively
-    invalid address is skipped, never bounced.
-  - **Duplicate guard** — one email per company within `DUP_WINDOW_DAYS`.
-  - **Bounce-rate auto-pause** — if the rolling bounce rate (min 20-send sample, counted
-    once per address) crosses `BOUNCE_PAUSE_THRESHOLD`, sending pauses; **Resume** starts
-    a fresh window.
-  - **Per-email operator approval** — nothing sends without your explicit checkbox.
+    (default 20, ceiling 75). `WARMUP_RAMP=false` uses the full cap from day 1.
+  - **Account-age gate** (`MIN_ACCOUNT_AGE_DAYS`), **randomised 90–180 s spacing**,
+    **verify-before-send** (Hunter mailbox check), **duplicate guard** (`DUP_WINDOW_DAYS`),
+    **bounce-rate auto-pause** (`BOUNCE_PAUSE_THRESHOLD`, min 20-send sample), and
+    **per-email operator approval**.
+- For autonomous applying: **low daily caps**, **human-like randomised pacing**,
+  **char-by-char typing** (not instant paste), **per-job dedupe**, and a **hard stop on
+  any captcha / checkpoint**. Submitting is irreversible — caps stay conservative on purpose.
 
 ## Requirements
 
 - Python 3.11
-- A **Groq API key** (drafting + form answers) — and optionally a second one as
-  `GROQ_API_KEY_BACKUP`, used automatically on a 429 rate-limit.
-- A **Hunter.io API key** (HR-email discovery + verification; free tier = 50/month) —
-  and optionally a second account's key as `HUNTER_API_KEY_BACKUP`, used automatically
-  when the first's monthly quota is exhausted.
+- **Groq API key** (drafting + screening answers) — optional `GROQ_API_KEY_BACKUP`, used
+  automatically on a 429.
+- **Hunter.io API key** (HR-email discovery + verification; free tier = 50/month) —
+  optional `HUNTER_API_KEY_BACKUP` for a second account when the first is exhausted.
 - **Gmail API** OAuth (Desktop client) for sending + reply scanning.
-- For Google-Forms auto-apply **and** assisted LinkedIn Easy Apply: Playwright + Chromium
-  (`py -3.11 -m playwright install chromium`) and a one-time Google / LinkedIn login.
-- *(Optional / legacy)* a Google Custom Search key + engine if you want the old ATS-board
-  discovery fallback.
-
-See `docs/05-Build-Runbook.md` for step-by-step key setup.
+- **Playwright + real Chrome** for all browser automation
+  (`py -3.11 -m playwright install chromium`; the channels use your installed Chrome via
+  `channel="chrome"`) and the one-time logins above.
 
 ## Setup
 
 ```powershell
-# 1. Create and activate a virtual environment
+# 1. Virtual environment
 python -m venv .venv
-.venv\Scripts\activate            # Windows
-# source .venv/bin/activate       # macOS / Linux
+.venv\Scripts\activate            # Windows  (source .venv/bin/activate on macOS/Linux)
 
-# 2. Install dependencies
+# 2. Dependencies
 pip install -r requirements.txt
+py -3.11 -m playwright install chromium
 
-# 3. Configure secrets
+# 3. Secrets + profile
 copy .env.example .env            # then edit .env and fill in your keys
+copy profile.example.json profile.json   # then fill in your details
 
-# 4. (For real sending) put your Gmail OAuth client at credentials.json
-#    and your CV at cv.pdf. Both are git-ignored.
+# 4. (For real sending) Gmail OAuth client at credentials.json, and your CV at cv.pdf.
+#    Both are git-ignored.
 ```
 
 ## Run
 
 ```powershell
-# Local-only bind. Open http://127.0.0.1:8000
-uvicorn app.main:app --host 127.0.0.1 --port 8000
-# or:  python -m app.main
+run.bat      # normal use — no auto-reload, so apply runs finish uninterrupted
+dev.bat      # development — auto-reloads on code changes (will kill an in-progress run)
 ```
+
+Then open **http://127.0.0.1:8000**. (Equivalently:
+`uvicorn app.main:app --host 127.0.0.1 --port 8000`.)
+
+> Dashboard apply runs execute **inside the web server**. Use `run.bat` (no `--reload`) for
+> real applying so a code change can't interrupt a batch. The CLI (`formtool.py platauto …`)
+> runs as a separate process and is always interruption-proof.
+
+## Apply from the CLI
+
+Everything in the Auto-Apply Center is also available on the CLI (a separate process,
+immune to dev-server reloads):
+
+```powershell
+py -3.11 formtool.py liapply 10                 # assisted LinkedIn: pre-fill, you submit
+py -3.11 formtool.py liauto                      # autonomous LinkedIn + ATS, up to the cap
+py -3.11 formtool.py platauto yc 3               # YC: apply to 3 (trailing int caps the run)
+py -3.11 formtool.py platauto cutshort "backend, fastapi" 5   # Cutshort: these skills, 5 jobs
+py -3.11 formtool.py platauto ziprecruiter "backend engineer" 1
+```
+
+A trailing integer caps that run; a comma-separated query targets specific skills (blank
+sweeps the defaults). Set `PLATFORM_DEBUG=1` to print per-job diagnostics + screenshots.
 
 ## Run the tests
 
@@ -135,175 +207,91 @@ pip install pytest
 pytest
 ```
 
-The suite (79 tests) locks the safety-critical logic before anything depends on it:
-email patterns, posting dedupe, ramp-cap (send + LinkedIn), rolling bounce-rate (incl.
-min-sample), LinkedIn parsing + filters (salary / blocklist / seniority / headcount),
-urgency scoring + urgent-first queue ordering, referral parsing, and form-field mapping.
-
-## Import contacts from a file (CSV / Excel)
-
-Instead of (or alongside) ① Find Jobs, bulk-import a curated list via the **Import from
-file** panel (drag-and-drop) or `POST /api/import`.
-
-| Column | Meaning |
-|---|---|
-| `company` | Company / organization name |
-| `role` | Role title |
-| `email` | Contact email (rows with one become `email_found`) |
-| `domain` | Company domain (auto-derived from the email if omitted) |
-| `location` | City / "Remote" |
-| `apply_url` | Portal-apply link (rows with no email stay `discovered`) |
-| `verified` | `yes`/`true` marks the email trusted (skips Hunter) |
-
-Download a starter from **Download template** (`GET /api/import/template`). Re-importing
-the same file is safe — duplicates (by email) are skipped.
-
-## Résumé autofill
-
-Drop your CV at `cv.pdf` and click **Read résumé** (or `POST /api/profile/read-resume`).
-It reads the PDF text + hyperlinks (pypdf) and fills only the **blank** fields of your
-`profile.json` (email, phone, LinkedIn/GitHub/LeetCode links, etc.) — it never overwrites
-values you set, and skips placeholder/dummy data.
+The suite (**100 tests**) locks the safety-critical logic: email patterns, posting dedupe,
+ramp caps (send + LinkedIn), rolling bounce-rate, LinkedIn parsing + filters
+(salary / blocklist / seniority / headcount), urgency scoring + urgent-first ordering, the
+learning answer-bank (normalise / persist / LLM skip-if-unsure / option-matching), the
+external-ATS submit/bot-wall detectors, the platform dedupe + caps, and form-field mapping.
+The DOM-driving is validated live on first runs (it can't be unit-tested without a
+logged-in account).
 
 ## Auto-apply to Google Forms (referral digests)
 
-Many channels forward "Referral Alert" emails — a numbered list of roles, each ending in
-**either a Google Form link or an email-to-apply**. AutoApply ingests these and applies
-under the same review-then-act discipline.
+Many channels forward "Referral Alert" emails — a numbered list of roles, each ending in a
+Google Form link or an email-to-apply. Paste one into the **Paste & apply** panel
+(or **Scan Gmail**): form rows become form applications, email rows flow into ③ Draft → ④
+Send. The engine reads each form's questions, maps them to your profile (open questions via
+Groq), and builds a **pre-filled link** you open in your own logged-in Chrome to attach the
+CV and Submit. **✓ Mark as submitted** records it; **×** archives the card.
 
-**One-time setup**
-
-1. **Install the browser engine:**
-   ```powershell
-   pip install -r requirements.txt
-   py -3.11 -m playwright install chromium
-   ```
-2. **Log into Google once** — these forms require sign-in, so the filler drives **real
-   Chrome** (`channel="chrome"`; the bundled Chromium is blocked by Google at sign-in),
-   saving the session in `.browser_profile/`:
-   ```powershell
-   py -3.11 formtool.py login
-   ```
-3. **Fill your profile** — copy `profile.example.json` to `profile.json` and fill it in
-   (name, email, phone, college, graduation year, **public CV link**, LinkedIn, GitHub,
-   LeetCode, expected stipend …). Set the CV link to **Anyone with the link → Viewer**.
-
-**Daily use (dashboard → referral / "Paste & apply" panel)**
-
-1. **Paste** the whole referral email and click **Parse & add jobs**. Google-Form rows
-   become form applications; email-to-apply rows flow into ③ Draft → ④ Send (with the
-   digest's subject, any Cc, and a links footer). Or **Scan Gmail** to pull digests.
-2. **Prepare pre-filled links** — the engine reads each form's questions, maps them to
-   your profile (open questions like "why should we hire you" answered by Groq), and
-   builds a **pre-filled link** (`viewform?usp=pp_url&entry.X=…`).
-3. **Open pre-filled form ↗** — opens the form **already filled, all pages**, in your own
-   logged-in Chrome. Attach your CV (file-upload questions must be done by hand — Google
-   blocks programmatic upload + submit), then **Submit**. Click **✓ Mark as submitted**
-   to record it. The **×** button **archives** a card (kept in history; Shift-click to
-   delete permanently).
-
-Validate the engine on one form from the CLI:
 ```powershell
-py -3.11 formtool.py check                       # confirm login + read a form
+py -3.11 formtool.py check                       # confirm Google login + read a form
 py -3.11 formtool.py read "<google-form-url>"    # print questions + planned answers
 ```
 
-## Apply on LinkedIn
+## Import contacts from a file (CSV / Excel)
 
-For LinkedIn jobs you found in ① Find Jobs, the **Apply on LinkedIn** panel drives the
-**Easy Apply** flow in your own logged-in Chrome. It runs in two modes, and shows a live
-**apply-queue** of exactly which jobs it will work through — **urgent / immediate-hiring
-posts first**, then plain "hiring" posts, then newest. Each queued job carries a 🔥 Urgent
-or Hiring badge and a link to the posting.
+Bulk-import a curated list via the **Import from file** panel or `POST /api/import`.
+Columns: `company`, `role`, `email`, `domain`, `location`, `apply_url`, `verified`.
+Download a starter from **Download template**. Re-importing the same file is safe
+(duplicates by email are skipped).
 
-| Mode | What it does |
-|---|---|
-| **Assisted** | Opens up to 10 matching jobs, **pre-fills** them, and holds the window — **you review and Submit**. Never auto-submits. |
-| **Auto-apply (autonomous)** | Submits to India-scope Easy-Apply jobs **end-to-end**, answering from your `profile.json` answer bank, up to the daily cap. **Skips (discards, never submits)** any job with a required question it can't answer safely, and **stops on a LinkedIn security check**. A **Stop** button halts it after the current job. |
+## Résumé autofill
 
-**Why urgent-first:** small companies put "Urgent Hiring" / "Immediate Joiner" in the job
-**title**, which the guest scraper can see; those listings move fastest, so the queue
-applies to them before anything else (detection is title-based — the low-ban-risk guest
-endpoint doesn't expose the full post body).
-
-> **Sensitive questions** — work authorization, visa sponsorship, citizenship,
-> EEO/diversity, background — are **deliberately left blank** in assisted mode; in
-> autonomous mode a job is **skipped** rather than guessed if such a field is required.
-> Automating your real LinkedIn account carries ban risk, so volume is capped and ramped.
-
-**One-time setup** — log into LinkedIn once in the same browser profile:
-```powershell
-py -3.11 formtool.py lilogin     # log into LinkedIn, then close the window
-```
-
-**Use it** — from the dashboard **Apply on LinkedIn** panel (**Assisted** or **Auto-apply**
-buttons), or from the CLI:
-```powershell
-py -3.11 formtool.py liapply 10  # assisted: pre-fill up to 10 Easy-Apply jobs, hold for review
-py -3.11 formtool.py liauto      # autonomous: submit up to the daily cap, urgent first
-```
-The daily cap ramps with a warm-up (Day 1–2 → 8, Day 3–5 → 15, Day 6+ → `LI_DAILY_CAP`,
-default 30; ceiling 75). Non-Easy-Apply jobs are flagged to apply on the company site.
-
-> Best-effort: LinkedIn changes its page markup and detects automation, so start with a
-> small batch and watch for any "unusual activity" prompts. The safe-field mapping that
-> decides which questions to auto-answer (and the urgency scoring) is unit-tested; the
-> page-driving is not. Run sparingly to keep ban risk low.
+Drop your CV at `cv.pdf` and click **Read résumé**. It reads the PDF text + hyperlinks
+(pypdf) and fills only the **blank** fields of `profile.json` — never overwriting values
+you set, and skipping placeholder/dummy data.
 
 ## Going live (real APIs + real sends)
 
-Do these in order. Until you finish, leave `DRY_RUN=true`.
+Do these in order; until you finish, leave `DRY_RUN=true`.
 
-1. **Fill `.env`** — `GROQ_API_KEY` (+ optional `GROQ_API_KEY_BACKUP`), `HUNTER_API_KEY`,
-   and your `SENDER_NAME` / `SIGNATURE` / `CV_SUMMARY`. (CSE keys optional/legacy.)
-2. **Gmail OAuth** — put the Desktop-app `credentials.json` in the project root. The
-   first real send/scan opens a browser to authorize and writes `token.json`. (If the
-   token is ever revoked, the app re-prompts a fresh login automatically.)
+1. **Fill `.env`** — `GROQ_API_KEY` (+ optional backup), `HUNTER_API_KEY`, `SENDER_NAME` /
+   `SIGNATURE` / `CV_SUMMARY`.
+2. **Gmail OAuth** — Desktop-app `credentials.json` in the project root; the first real
+   send/scan authorizes and writes `token.json` (auto-re-prompts if revoked).
 3. **CV** — place your PDF at `cv.pdf` (or set `CV_PATH`). Real sends refuse without it.
-4. **Warm-up gate** — set `ACCOUNT_CREATED_DATE=YYYY-MM-DD` to your sender Gmail's
-   creation date.
-5. **First-send safety** — set `FIRST_SEND_TEST_INBOX` to a secondary inbox **you own**.
-   The first real send is refused unless addressed there.
-6. **Flip the switch** — set `DRY_RUN=false` and restart. Approve emails one batch at a
-   time; nothing sends without your per-email approval.
+4. **Warm-up gate** — `ACCOUNT_CREATED_DATE=YYYY-MM-DD` (your sender Gmail's creation date).
+5. **First-send safety** — `FIRST_SEND_TEST_INBOX` = a secondary inbox **you own**.
+6. **Flip the switch** — `DRY_RUN=false`, restart, approve emails one batch at a time.
 
-If the bounce rate crosses `BOUNCE_PAUSE_THRESHOLD`, sending auto-pauses — fix/remove the
-bad addresses, then **Resume** (which starts a fresh bounce window).
-
-> **Hunter free tier is 50 lookups/month.** Find Jobs caps HR lookups per run; once the
-> month is exhausted, new email discovery and pre-send verification pause until reset —
-> existing emails still send (trusting prior verification), protected by the warm-up +
-> bounce auto-pause.
+> **Hunter free tier is 50 lookups/month.** Once exhausted, new email discovery and
+> pre-send verification pause until reset; existing emails still send (trusting prior
+> verification), protected by warm-up + bounce auto-pause.
 
 ## Files & secrets
 
 **Git-ignored, never leave your machine:** `.env`, `credentials.json`, `token.json`,
-`jobs.db`, `cv.pdf`, any résumé `*.pdf`, `jobs.csv`, `profile.json`, `*.log`, the saved
-browser session `.browser_profile/`, and form screenshots in `form_shots/`.
+`jobs.db`, `cv.pdf`, any résumé `*.pdf`, `jobs.csv`, `profile.json`, `answer_bank.json`,
+`platform_applied.json`, `*.log`, the saved browser session `.browser_profile/`, and form
+screenshots in `form_shots/`.
 
 ## Project layout
 
 ```
 app/
   main.py            FastAPI app, routes, static mount, scheduler lifecycle (127.0.0.1)
-  config.py          .env loader + typed settings (DRY_RUN default on; WARMUP_RAMP; backup Groq key)
+  config.py          .env loader + typed settings (DRY_RUN default on; warm-up; backup keys)
   db.py              SQLite engine, schema init + self-healing migrations, repository helpers
   models.py          SQLModel models (companies[+salary,+headcount,+urgent], contacts,
                      applications[+apply_kind/form_*/email_cc/archived], send_log, settings)
-  logic.py           pure safety logic (patterns, dedupe, ramp cap + li_ramp_cap, bounce rate + min-sample)
-  logging_setup.py   structured autoapply.log
+  logic.py           pure safety logic (patterns, dedupe, ramp caps, bounce rate + min-sample)
   profile.py         applicant profile loader (profile.json) for form-filling
-  services/          discovery (LinkedIn+Hunter), contacts (Hunter back-fill), drafting (+intl pitch),
-                     sender (anti-ban), replies, importer, resume (CV->profile),
-                     referrals (digest parse), formfiller (Q->A map), forms (pre-fill orchestration),
-                     linkedin_apply (Easy Apply: assisted pre-fill + autonomous auto-submit, urgent-first)
-  integrations/      gmail, groq_client (+backup-key failover), hunter (verify + HR domain-search,
-                     multi-key rotation), linkedin (guest jobs scraper + urgency scoring), cse (legacy),
-                     browser (Playwright/real Chrome: Google Forms + LinkedIn assisted/autonomous Easy Apply)
+  services/          discovery (LinkedIn+Hunter), contacts, drafting (+intl pitch), sender (anti-ban),
+                     replies, importer, resume (CV->profile), referrals, formfiller, forms,
+                     answer_bank (learning bank + LLM screening fallback),
+                     linkedin_apply (Easy Apply + ATS auto-submit, urgent-first),
+                     platform_apply (YC / Cutshort / ZipRecruiter orchestration + caps)
+  integrations/      gmail, groq_client (+backup-key failover), hunter (multi-key rotation),
+                     linkedin (guest jobs scraper + urgency scoring), cse (legacy),
+                     browser (Playwright/real Chrome: forms + LinkedIn Easy Apply + external ATS),
+                     platforms (YC / Cutshort / ZipRecruiter drivers, login + dedupe)
   prompts.py         draft (India + international variants) + classify prompt templates
-formtool.py          CLI: Google/LinkedIn login + check / read / fill a form + liapply / liauto
-static/              index.html, app.js, referrals.js, styles.css  (dashboard)
-tests/               unit tests (79): pure logic + LinkedIn discovery + urgency/queue order + referral parse + form mapping
+formtool.py          CLI: logins (Google/LinkedIn/platforms) + form tools + liapply/liauto/platauto
+static/              index.html, app.js, referrals.js, styles.css  (dashboard + Auto-Apply Center)
+tests/               unit tests (100): safety logic, LinkedIn discovery, answer-bank,
+                     external-ATS detectors, platform caps/dedupe, urgency/queue order
+run.bat / dev.bat    normal-use (no reload) / development (reload) launchers
 ```
 
 See `docs/` for the full PRD, SRS, Architecture, Technical Spec, and Build Runbook.
