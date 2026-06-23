@@ -191,8 +191,18 @@ def test_skip_reason_keeps_target_ai_and_software_roles():
     from app.integrations.platforms import _skip_reason
     for keep in ["AI Engineer", "Generative AI Engineer", "Senior AI Engineer",
                  "Backend Engineer (Python/Golang)", "Full Stack Developer",
-                 "Senior Full Stack Engineer (AI Platform)", "Software Engineer"]:
+                 "Senior Full Stack Engineer (AI Platform)", "Software Engineer",
+                 "Design Engineer"]:   # 'designer' must NOT match 'Design Engineer'
         assert _skip_reason(keep) is None, keep
+
+
+def test_skip_reason_drops_non_engineering_roles():
+    """Wellfound's /role/r/ai-engineer mixes in marketing/sales/design/PM — drop those."""
+    from app.integrations.platforms import _skip_reason
+    for drop in ["Product Marketing Lead", "Growth Marketer", "Sales Engineer",
+                 "Account Executive", "Technical Recruiter", "Customer Success Manager",
+                 "Product Designer", "Senior Product Manager", "Project Manager"]:
+        assert _skip_reason(drop) == "off-target", drop
 
 
 def test_wellfound_role_slug_defaults_to_ai():

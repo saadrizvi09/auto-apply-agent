@@ -257,18 +257,29 @@ _OFF_TARGET_TITLE_MARKERS = (
     "research scientist", "deep learning", " etl ",
 )
 _INTERN_TITLE_MARKERS = ("intern", "internship", "trainee", "apprentice")
+# Non-engineering roles that slip onto AI/eng listing pages (Wellfound's /role/r/ai-engineer
+# mixes in marketing/sales/design/PM). The operator wants AI/software-engineering ONLY.
+# NOTE: "designer" is intentionally listed but does NOT match "Design Engineer" (no trailing
+# "er" after "design ") — that borderline-technical title is kept on purpose.
+_NON_ENG_TITLE_MARKERS = (
+    "marketing", "marketer", " sales ", "account executive", "account manager",
+    "recruiter", "recruiting", "talent acquisition", "customer success", "customer support",
+    "designer", "product manager", "program manager", "project manager",
+    "business development", "content writer", "copywriter", "community manager",
+)
 
 
 def _skip_reason(title: str) -> str | None:
     """Return why this title is off-target for the operator, or None if it's a keeper.
-    Catches internships, ML/data roles, and unreachable senior/exec titles — so external
-    auto-apply only submits AI/software roles a 2026 new-grad actually wants. 'Senior' is
-    intentionally NOT skipped (startups offer it to strong juniors)."""
+    Catches internships, ML/data roles, non-engineering roles (marketing/sales/design/PM),
+    and unreachable senior/exec titles — so external auto-apply only submits AI/software roles
+    a 2026 new-grad actually wants. 'Senior' is intentionally NOT skipped (startups offer it
+    to strong juniors)."""
     import re
     low = " " + re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).strip() + " "
     if any(m in low for m in _INTERN_TITLE_MARKERS):
         return "intern"
-    if any(m in low for m in _OFF_TARGET_TITLE_MARKERS):
+    if any(m in low for m in _OFF_TARGET_TITLE_MARKERS) or any(m in low for m in _NON_ENG_TITLE_MARKERS):
         return "off-target"
     if any(m in low for m in _YC_SKIP_TITLES):
         return "senior-role"
@@ -785,23 +796,24 @@ def _wellfound_message(profile: dict, company: str, role: str) -> str:
 
 
 def _wellfound_discover(ctx, role_slug: str, remote: bool, limit: int) -> list[dict]:
-    """Collect Wellfound job-detail links for one role. remote=True biases to worldwide-remote
-    (the operator's top priority). Job links look like /jobs/{id}-{slug}."""
+    """Collect Wellfound job-detail links for one role. Job links look like /jobs/{id}-{slug}.
+    Uses `/role/r/{slug}` — LIVE-VERIFIED to be the role-targeted listing AND already
+    remote-biased (its heading is "Remote {Role} Jobs"). The old `/role/remote/{slug}` was an
+    empty SEO hub page and `/role/{slug}-jobs` / `/role/l/remote/{slug}` 404. `remote` is kept
+    for API symmetry; a city-scoped search would need the `/role/l/{slug}/{city}` form (not wired)."""
     import re
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
-    # Worldwide-remote first, else the plain role page.
-    url = (f"https://wellfound.com/role/r/{role_slug}" if not remote
-           else f"https://wellfound.com/role/remote/{role_slug}")
+    url = f"https://wellfound.com/role/r/{role_slug}"
     if not browser._safe_goto(page, url):
-        # fall back to the non-remote role page if the remote slug 404s
-        if remote and browser._safe_goto(page, f"https://wellfound.com/role/r/{role_slug}"):
-            pass
-        else:
-            _dbg("wellfound", f"  [wellfound] listing failed to load: {url}")
-            return []
+        _dbg("wellfound", f"  [wellfound] listing failed to load: {url}")
+        return []
     page.wait_for_timeout(3000)
     if browser._ats_is_blocked(page):
         _dbg("wellfound", "  [wellfound] blocked on listing (Cloudflare)")
+        return []
+    h1 = page.query_selector("h1")
+    if h1 and "not found" in (h1.inner_text() or "").lower():
+        _dbg("wellfound", f"  [wellfound] role slug 404'd: {role_slug}")
         return []
     for _ in range(6):  # infinite scroll
         page.mouse.wheel(0, 4000)
