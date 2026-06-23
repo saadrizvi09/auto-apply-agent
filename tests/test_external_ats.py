@@ -179,19 +179,40 @@ def test_skip_reason_drops_off_target_and_interns():
     assert _skip_reason("Senior Data Scientist") == "off-target"
     assert _skip_reason("Machine Learning Engineer") == "off-target"
     assert _skip_reason("SQL Developer & ETL, Python, Cloud Engineer") == "off-target"
-    # internships / trainee
+    # internships / trainee (skipped by default — India platforms can't confirm >=8 LPA)
     assert _skip_reason("Robotics Intern") == "intern"
     assert _skip_reason("Software Trainee") == "intern"
-    # unreachable senior/exec
+    # unreachable senior/lead/exec (operator is a fresher)
     assert _skip_reason("Staff Software Engineer") == "senior-role"
     assert _skip_reason("Engineering Manager") == "senior-role"
 
 
+def test_skip_reason_drops_senior_for_fresher():
+    """Operator is a 2026 fresher — Senior/Sr/Lead titles are low-probability, skip them."""
+    from app.integrations.platforms import _skip_reason
+    assert _skip_reason("Senior AI Engineer") == "senior-role"
+    assert _skip_reason("Senior - AI Engineer") == "senior-role"
+    assert _skip_reason("Sr. Software Engineer") == "senior-role"
+    assert _skip_reason("Senior Full Stack Engineer (AI Platform)") == "senior-role"
+    assert _skip_reason("Lead Software Engineer") == "senior-role"
+
+
+def test_skip_reason_allow_intern_for_foreign():
+    """Foreign/worldwide-remote platforms keep internships (operator will take an unpaid
+    foreign role); the senior + off-target filters still apply."""
+    from app.integrations.platforms import _skip_reason
+    assert _skip_reason("AI Engineering Intern", allow_intern=True) is None
+    assert _skip_reason("Software Engineer Intern", allow_intern=True) is None
+    # but allow_intern does NOT rescue senior or off-target
+    assert _skip_reason("Senior AI Engineer", allow_intern=True) == "senior-role"
+    assert _skip_reason("Marketing Intern", allow_intern=True) == "off-target"
+
+
 def test_skip_reason_keeps_target_ai_and_software_roles():
     from app.integrations.platforms import _skip_reason
-    for keep in ["AI Engineer", "Generative AI Engineer", "Senior AI Engineer",
+    for keep in ["AI Engineer", "Generative AI Engineer", "Founding Engineer",
                  "Backend Engineer (Python/Golang)", "Full Stack Developer",
-                 "Senior Full Stack Engineer (AI Platform)", "Software Engineer",
+                 "Founding AI Engineer", "Software Engineer",
                  "Design Engineer"]:   # 'designer' must NOT match 'Design Engineer'
         assert _skip_reason(keep) is None, keep
 

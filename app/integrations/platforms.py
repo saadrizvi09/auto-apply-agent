@@ -269,19 +269,28 @@ _NON_ENG_TITLE_MARKERS = (
 )
 
 
-def _skip_reason(title: str) -> str | None:
+# The operator is a 2026 FRESHER — "Senior"/"Sr"/"Lead"/etc. roles are low-probability, so
+# skip them (this is on top of _YC_SKIP_TITLES' staff/principal/director/manager/architect).
+# "Founding Engineer" is NOT senior and is kept (attainable for strong juniors at startups).
+_SENIOR_MARKERS = (" senior ", " sr ", " snr ")
+
+
+def _skip_reason(title: str, allow_intern: bool = False) -> str | None:
     """Return why this title is off-target for the operator, or None if it's a keeper.
-    Catches internships, ML/data roles, non-engineering roles (marketing/sales/design/PM),
-    and unreachable senior/exec titles — so external auto-apply only submits AI/software roles
-    a 2026 new-grad actually wants. 'Senior' is intentionally NOT skipped (startups offer it
-    to strong juniors)."""
+    Catches ML/data roles, non-engineering roles (marketing/sales/design/PM), unreachable
+    senior/lead/exec titles, and (by default) internships — so external auto-apply only submits
+    realistic AI/software roles a 2026 fresher can actually land.
+
+    allow_intern=True keeps internships (used for FOREIGN/worldwide-remote platforms — the
+    operator will take an unpaid foreign role). India platforms keep the default (skip interns:
+    Cutshort gives no salary on the card, so an India intern can't be confirmed >=8 LPA)."""
     import re
     low = " " + re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).strip() + " "
-    if any(m in low for m in _INTERN_TITLE_MARKERS):
+    if not allow_intern and any(m in low for m in _INTERN_TITLE_MARKERS):
         return "intern"
     if any(m in low for m in _OFF_TARGET_TITLE_MARKERS) or any(m in low for m in _NON_ENG_TITLE_MARKERS):
         return "off-target"
-    if any(m in low for m in _YC_SKIP_TITLES):
+    if any(m in low for m in _YC_SKIP_TITLES) or any(m in low for m in _SENIOR_MARKERS):
         return "senior-role"
     return None
 
@@ -358,7 +367,7 @@ def yc_autoapply(profile: dict, role_key: str, remote: bool, max_apply: int) -> 
                 key = f"yc:{j['url']}"
                 if _already_applied(key):
                     continue
-                reason = _skip_reason(j.get("company"))
+                reason = _skip_reason(j.get("company"), allow_intern=True)  # YC startups, mostly foreign/remote
                 if reason:
                     _dbg("yc", f"  [yc] skipping {reason} role '{j.get('company')}'")
                     results.append({"company": j["company"], "url": j["url"],
@@ -863,7 +872,7 @@ def wellfound_autoapply(profile: dict, query: str, remote: bool, max_apply: int)
                 key = f"wellfound:{j['url']}"
                 if _already_applied(key):
                     continue
-                reason = _skip_reason(j.get("company"))
+                reason = _skip_reason(j.get("company"), allow_intern=True)  # foreign/remote — unpaid OK
                 if reason:
                     _dbg("wellfound", f"  [wellfound] skipping {reason} role '{j.get('company')}'")
                     results.append({"company": j["company"], "url": j["url"],
