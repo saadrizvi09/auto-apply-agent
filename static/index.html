@@ -247,22 +247,24 @@
           </span>
           <div class="aac-card-title">
             <strong>LinkedIn + Company sites</strong>
-            <span class="aac-sub">Easy Apply <em>and</em> external ATS forms (Greenhouse · Lever · Ashby) auto-submitted end-to-end.</span>
+            <span class="aac-sub">Easy Apply auto-submitted; non-Easy-Apply company forms (Greenhouse · Lever · Ashby) AI-filled for you to submit.</span>
           </div>
           <span class="aac-badge aac-badge-ok">Reliable</span>
           <span id="li-count" class="count-pill">0</span>
         </div>
         <div class="aac-actions">
-          <button id="btn-li-apply" type="button" class="btn-ghost">Assisted (you submit)</button>
+          <button id="btn-li-apply" type="button" class="btn-ghost">Assisted Easy Apply</button>
+          <button id="btn-li-hard" type="button" class="btn-ghost">Hard apply (AI-fill, you submit)</button>
           <button id="btn-li-stop" type="button" class="btn-ghost hidden danger">Stop</button>
-          <button id="btn-li-auto" type="button" class="btn-find">Auto-apply (autonomous)</button>
+          <button id="btn-li-auto" type="button" class="btn-find">Auto-apply Easy Apply</button>
         </div>
         <div id="li-result" class="find-summary hidden"></div>
         <div id="li-queue" class="li-queue"></div>
         <p class="li-hint">
-          One-time: <code>py -3.11 formtool.py lilogin</code>. <b>Auto-apply</b> submits to India + remote Easy-Apply jobs
-          and, for non-Easy-Apply jobs, drives the company ATS form too — answering from your learning bank, skipping
-          anything it can't answer, and stopping on a security check. <b>Assisted</b> pre-fills and you submit.
+          One-time: <code>py -3.11 formtool.py lilogin</code>. <b>Auto-apply</b> submits to Easy-Apply jobs up to the daily
+          cap (skips what it can't answer, stops on a security check) and lists any non-Easy-Apply links. <b>Hard apply</b>
+          opens those company-site forms, AI-fills everything it knows (résumé, dropdowns, self-ID), and HOLDS each window
+          for you to review + Submit. Neither <b>Assisted</b> nor <b>Hard apply</b> ever submits for you.
         </p>
       </div>
 
@@ -303,6 +305,23 @@
           <div class="aac-result hidden" data-result="cutshort"></div>
         </div>
 
+        <div class="aac-card" data-platform="wellfound">
+          <div class="aac-card-head">
+            <span class="aac-ico aac-ico-wf">wf</span>
+            <div class="aac-card-title">
+              <strong>Wellfound</strong>
+              <span class="aac-sub">Ex-AngelList startups. Worldwide-remote first; AI/software only.</span>
+            </div>
+            <span class="aac-badge aac-badge-warn" title="ToS-restricted + Cloudflare. Stops on any challenge.">ToS risk</span>
+          </div>
+          <div class="aac-actions">
+            <input type="text" class="aac-q" data-q="wellfound" placeholder="blank = ai-engineer, or e.g. software engineer, backend" />
+            <input type="number" class="aac-n" data-n="wellfound" min="1" max="10" placeholder="#" title="How many to apply to (blank = daily cap)" />
+            <button type="button" class="btn-find aac-run" data-run="wellfound">Auto-apply</button>
+          </div>
+          <div class="aac-result hidden" data-result="wellfound"></div>
+        </div>
+
         <div class="aac-card" data-platform="ziprecruiter">
           <div class="aac-card-head">
             <span class="aac-ico aac-ico-zr">ZR</span>
@@ -322,7 +341,7 @@
 
       </div>
       <p class="li-hint">
-        Each platform needs a one-time login: <code>py -3.11 formtool.py platlogin &lt;yc|cutshort|ziprecruiter&gt;</code>.
+        Each platform needs a one-time login: <code>py -3.11 formtool.py platlogin &lt;yc|cutshort|ziprecruiter|wellfound&gt;</code>.
         These three <b>prohibit automation in their ToS</b> (account risk you've accepted) — every run is low-volume and
         <b>stops on any captcha/security check</b>. First runs validate the page layout live.
       </p>

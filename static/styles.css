@@ -660,6 +660,7 @@ td .cell-muted { color: var(--faint); }
 .aac-ico-yc { background: #ff6b00; }
 .aac-ico-cs { background: #6d4aff; font-size: 0.8rem; }
 .aac-ico-zr { background: #1a9c4f; font-size: 0.78rem; }
+.aac-ico-wf { background: #1f2d3d; font-size: 0.78rem; }
 .aac-card-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .aac-card-title strong { font-size: 0.98rem; color: var(--text); }
 .aac-sub { font-size: 0.8rem; color: var(--muted); line-height: 1.35; }

@@ -603,6 +603,36 @@ _FOREIGN_PHRASES = (
 )
 _FOREIGN_TOKENS = {"us", "usa", "uk", "eu", "uae"}
 
+# Questions we NEVER auto-answer, even on external forms (legal/risk — leave for the human).
+_HARD_BLOCK = ("felony", "criminal", "background check", "background-check",
+               "clearance", "security clearance")
+# Voluntary self-identification questions. On LinkedIn these stay blank (skip). On an
+# EXTERNAL form (allow_sensitive=True) the LLM answers them from the profile, preferring a
+# "decline to self-identify" option when the data can't determine it — so a REQUIRED EEO
+# field no longer blocks the whole application.
+_SELF_ID = ("disab", "veteran", "race", "ethnic", "hispanic", "latino", "transgender",
+            "gender identity", "sexual orientation", "pronoun", "lgbt", "marital",
+            "religion", "caste", "do you identify")
+# Option texts that mean "I'd rather not disclose" — the safe, valid fallback for self-ID.
+_DECLINE_MARKERS = ("decline to", "prefer not", "do not wish", "don't wish", "rather not",
+                    "not to say", "not to answer", "not disclose", "i don't want to answer",
+                    "choose not to")
+# Combobox/select trigger texts that are placeholders (i.e. nothing chosen yet).
+_SELECT_PLACEHOLDERS = {"", "select", "select...", "select an option", "select option",
+                        "choose", "choose...", "please select", "-", "--", "none"}
+
+
+def _decline_option(options: list[str]) -> str | None:
+    """The 'prefer not to say' / 'decline to self-identify' option from a list, or None."""
+    for o in options or []:
+        if any(m in (o or "").lower() for m in _DECLINE_MARKERS):
+            return o
+    return None
+
+
+def _is_self_id(low: str) -> bool:
+    return any(k in low for k in _LI_SENSITIVE) or any(k in low for k in _SELF_ID)
+
 
 def _mentions_foreign(low: str) -> bool:
     import re
@@ -704,6 +734,9 @@ def _li_radio_answer(question: str, p: dict) -> str | None:
         return p.get("gender")
     if "relocat" in low:
         return p.get("willing_to_relocate") or "Yes"
+    if "employment status" in low or has("not working currently", "not resigned",
+                                         "on notice period"):
+        return p.get("employment_status", "On notice period")
     if has("currently working", "currently employed", "presently working",
            "are you working", "currently in a job", "working professional"):
         return p.get("currently_working", "Yes")
@@ -722,11 +755,32 @@ def _li_radio_answer(question: str, p: dict) -> str | None:
 # here (they return None, so a required one makes the agent skip the job). Any answer
 # the LLM produces is banked, so the same question is answered instantly next time.
 
-def _li_resolve_text(label: str, p: dict, options: list[str] | None = None) -> str | None:
-    """Resolve a text/select field's answer. None => leave blank / skip the job."""
+def _resolve_self_id(question: str, p: dict, options: list[str] | None) -> str | None:
+    """Answer a voluntary self-ID question (gender/disability/veteran/transgender/…) from
+    the profile via the LLM, falling back to a 'decline to self-identify' option when the
+    data can't determine it. Used ONLY on external forms (allow_sensitive=True), so a
+    REQUIRED EEO field gets a valid answer instead of blocking the whole application."""
+    from ..services import answer_bank
+    banked = answer_bank.get(question)
+    if banked:
+        return banked
+    ans = answer_bank.llm_answer(question, p, options=options, self_id=True)
+    if not ans and options:                    # LLM couldn't tell -> decline if offered
+        ans = _decline_option(options)
+    if ans:
+        answer_bank.remember(question, ans)
+    return ans
+
+
+def _li_resolve_text(label: str, p: dict, options: list[str] | None = None,
+                     allow_sensitive: bool = False) -> str | None:
+    """Resolve a text/select field's answer. None => leave blank / skip the job.
+    allow_sensitive=True (external forms) lets the LLM answer self-ID questions."""
     low = (label or "").lower()
-    if not low or any(k in low for k in _LI_SENSITIVE):
+    if not low or any(k in low for k in _HARD_BLOCK):
         return None
+    if _is_self_id(low):                       # voluntary self-identification
+        return _resolve_self_id(label, p, options) if allow_sensitive else None
     val = _li_value_for(label, p)              # 1. static profile map (fast, exact)
     if val:
         return str(val)
@@ -740,11 +794,15 @@ def _li_resolve_text(label: str, p: dict, options: list[str] | None = None) -> s
     return ans
 
 
-def _li_resolve_choice(question: str, p: dict, options: list[str]) -> str | None:
-    """Resolve a radio / multiple-choice answer, constrained to `options`."""
+def _li_resolve_choice(question: str, p: dict, options: list[str],
+                       allow_sensitive: bool = False) -> str | None:
+    """Resolve a radio / multiple-choice answer, constrained to `options`.
+    allow_sensitive=True (external forms) lets the LLM answer self-ID questions."""
     low = (question or "").lower()
-    if not low or any(k in low for k in _LI_SENSITIVE):
+    if not low or any(k in low for k in _HARD_BLOCK):
         return None
+    if _is_self_id(low):                       # voluntary self-identification
+        return _resolve_self_id(question, p, options) if allow_sensitive else None
     val = _li_radio_answer(question, p)        # 1. static map (Yes/No heuristics)
     if val:
         return str(val)
@@ -800,6 +858,46 @@ def _li_learnable(label: str, p: dict, is_choice: bool = False) -> bool:
         return False
     static = _li_radio_answer(label, p) if is_choice else _li_value_for(label, p)
     return static is None
+
+
+def _best_option_match(query: str, options: list[str]) -> str | None:
+    """Pick the option that best matches `query`, preferring PRECISE matches over loose
+    ones so a short query never grabs a longer, unrelated option — the classic
+    "India" -> "British Indian Ocean Territory" bug (where "india" is a substring of
+    "indian"). Ranking, best first:
+      1. exact (case-insensitive), then exact ignoring punctuation/dial-codes
+      2. query appears as a WHOLE WORD / token-run in the option (word boundaries)
+      3. option starts with query (query is a real prefix, length-guarded)
+      4. query starts with option (option is an abbreviation of the answer)
+    A bare substring buried inside a longer word is NOT accepted. Returns the matching
+    option string (verbatim), or None."""
+    import re
+    q = (query or "").strip().lower()
+    if not q:
+        return None
+    norm = [(o, (o or "").strip().lower()) for o in options if (o or "").strip()]
+    # 1. exact
+    for orig, low in norm:
+        if low == q:
+            return orig
+    qa = re.sub(r"[^a-z0-9]+", " ", q).strip()
+    for orig, low in norm:                       # exact ignoring punctuation/dial-codes
+        if re.sub(r"[^a-z0-9]+", " ", low).strip() == qa:
+            return orig
+    # 2. whole-word: query is a standalone token-run in the option ("india" != "indian")
+    for orig, low in norm:
+        if re.search(rf"\b{re.escape(q)}\b", low):
+            return orig
+    # 3. option starts with query (prefix), length-guarded to avoid 1-2 char noise
+    if len(qa) >= 3:
+        for orig, low in norm:
+            if low.startswith(q):
+                return orig
+    # 4. query starts with option (option is an abbreviation of a longer answer)
+    for orig, low in norm:
+        if len(low) >= 2 and q.startswith(low):
+            return orig
+    return None
 
 
 def _li_label_for(modal, el) -> str:
@@ -869,12 +967,13 @@ def _fill_linkedin_modal(page, p: dict) -> tuple[int, int, bool]:
         val = _li_resolve_text(label, p, options=sel_opts)
         if not val:
             continue
+        choice = _best_option_match(str(val), sel_opts) or str(val)
         try:
-            sel.select_option(label=str(val))
+            sel.select_option(label=choice)
             filled += 1
         except Exception:
             try:
-                sel.select_option(value=str(val))
+                sel.select_option(value=choice)
                 filled += 1
             except Exception:
                 pass
@@ -892,8 +991,10 @@ def _fill_linkedin_modal(page, p: dict) -> tuple[int, int, bool]:
         ans = _li_resolve_choice(q, p, fs_labels)
         if not ans:
             continue
+        target = _best_option_match(ans, fs_labels) or ans
         for lab in fs.query_selector_all("label"):
-            if ans.lower() in ((lab.inner_text() or "").strip().lower()):
+            lt = (lab.inner_text() or "").strip()
+            if lt and (lt == target or target.lower() in lt.lower()):
                 try:
                     lab.click()
                     filled += 1
@@ -1054,34 +1155,461 @@ def _ext_label_for(page, el) -> str:
         return ""
 
 
-def _fill_external_form(page, p: dict, upload_cv: bool = True) -> tuple[int, int, bool]:
-    """Pre-fill a generic ATS application form (only empty, safe fields). Idempotent,
-    never submits. Returns (filled_now, total, resume_attached).
+# Labels that mean "cover letter / free-text pitch" — filled with a generated letter,
+# never with a one-line profile value, and never the target of the résumé upload.
+_COVER_LETTER_MARKERS = (
+    "cover letter", "why do you want", "why are you", "why this", "why should we",
+    "message to", "tell us about", "additional information", "anything else",
+    "motivation", "what excites", "note to",
+)
 
-    upload_cv=False skips the file upload — used for sites that attach the résumé from a
-    saved profile (e.g. Cutshort's Talent Card), where re-uploading cv.pdf just errors."""
+
+def _ext_cover_letter(p: dict, company: str, role: str) -> str:
+    """Generate a short cover letter for an external ATS form via the LLM. '' in DRY_RUN."""
+    from . import groq_client
+    from ..profile import context_block
+    system = (
+        "Write a concise, specific cover letter (4–6 sentences, plain text, first person, "
+        "no salutation or sign-off) for a job application. Reference the company and role and "
+        "1–2 concrete strengths from the candidate profile. Genuine and tailored, never generic."
+    )
+    user = (f"Candidate:\n{context_block(p)}\n\nCompany: {company or 'the company'}\n"
+            f"Role: {role or 'this role'}\n\nCover letter:")
+    try:
+        return (groq_client.chat(system, user, temperature=0.6, max_tokens=320) or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _ext_click_choice(group, answer: str) -> bool:
+    """Click the option matching `answer` inside a radio/choice group — CLICKING the
+    control (native radio label, ARIA radio, button) rather than typing the text, which a
+    selection control would never store. Collects every clickable option, then uses the
+    precise matcher to pick one (so "Yes" never grabs "Yes, with conditions" by accident,
+    and a short answer never lands on a longer unrelated option). Returns True if clicked."""
+    a = (answer or "").strip()
+    if not a:
+        return False
+    cands = []  # (visible_text, clickable_element)
+    # 1. native radios/checkboxes — the input is often hidden, so click its <label>
+    for inp in group.query_selector_all('input[type="radio"], input[type="checkbox"]'):
+        try:
+            rid = inp.get_attribute("id")
+            lab = group.query_selector(f'label[for="{rid}"]') if rid else None
+            txt = ((lab.inner_text() if lab else "") or inp.get_attribute("value") or "").strip()
+            if txt:
+                cands.append((txt, lab or inp))
+        except Exception:
+            continue
+    # 2. ARIA radios / options / buttons / labels rendered as clickable elements
+    for sel in ('[role="radio"]', '[role="option"]', 'button', 'label', '[role="button"]'):
+        for el in group.query_selector_all(sel):
+            try:
+                txt = ((el.inner_text() or "") or el.get_attribute("aria-label") or "").strip()
+                if txt:
+                    cands.append((txt, el))
+            except Exception:
+                continue
+    if not cands:
+        return False
+    match = _best_option_match(a, [t for t, _ in cands])
+    if not match:
+        return False
+    for txt, el in cands:
+        if txt == match:
+            try:
+                el.click()
+                return True
+            except Exception:
+                return False
+    return False
+
+
+def _ext_select_combobox(page, trigger, value: str) -> bool:
+    """Open a React/ARIA combobox (React-Select etc.) and pick `value` using PRECISE
+    matching (so "India" never grabs "British Indian Ocean Territory"): click trigger →
+    collect the visible options → choose the best match → click it. Keyboard-filter
+    fallback for long lists, then Enter as a last resort."""
+    v = (value or "").strip()
+    if not v:
+        return False
+    try:
+        trigger.click()
+        page.wait_for_timeout(300)
+        for attempt in range(2):
+            opts = []  # (visible_text, element)
+            for opt in page.query_selector_all(
+                '[role="option"], div[class*="__option"], li[role="option"], '
+                'div[class*="-option"]'
+            ):
+                try:
+                    if opt.is_visible():
+                        t = (opt.inner_text() or "").strip()
+                        if t:
+                            opts.append((t, opt))
+                except Exception:
+                    continue
+            match = _best_option_match(v, [t for t, _ in opts])
+            if match:
+                for t, opt in opts:
+                    if t == match:
+                        try:
+                            opt.click()
+                            return True
+                        except Exception:
+                            break
+            if attempt == 0:   # keyboard filter, then retry the option scan
+                try:
+                    page.keyboard.type(v)
+                    page.wait_for_timeout(400)
+                except Exception:
+                    break
+        try:
+            page.keyboard.press("Enter")
+            return True
+        except Exception:
+            return False
+    except Exception:
+        return False
+
+
+def _ext_pick_typeahead(page, el, typed: str) -> bool:
+    """After typing into an autocomplete field (e.g. Greenhouse 'Location (City)'), choose
+    the matching dropdown suggestion — preferring an India result — else ArrowDown+Enter.
+    Without selecting a suggestion the field stays invalid and the form won't submit (the
+    'typed New Delhi but never picked it' bug)."""
+    t = (typed or "").strip().lower()
+    try:
+        page.wait_for_timeout(900)
+        opts = []  # (visible_text, element)
+        for o in page.query_selector_all(
+            '[role="option"], li[role="option"], .select__option, '
+            'div[class*="option"], ul[role="listbox"] li'
+        ):
+            try:
+                if o.is_visible():
+                    txt = (o.inner_text() or "").strip()
+                    if txt:
+                        opts.append((txt, o))
+            except Exception:
+                continue
+        pick = None
+        for txt, o in opts:                     # 1. India suggestion matching what we typed
+            low = txt.lower()
+            if "india" in low and (not t or t in low):
+                pick = o
+                break
+        if not pick:
+            for txt, o in opts:                 # 2. first suggestion matching what we typed
+                if t and t in txt.lower():
+                    pick = o
+                    break
+        if not pick and opts:                   # 3. first suggestion offered
+            pick = opts[0][1]
+        if pick:
+            pick.click()
+            return True
+        el.press("ArrowDown")
+        el.press("Enter")
+        return True
+    except Exception:
+        try:
+            el.press("ArrowDown")
+            el.press("Enter")
+            return True
+        except Exception:
+            return False
+
+
+_SELECT_OPTION_SEL = ('[role="option"], li[role="option"], div[class*="__option"], '
+                      'div[class*="-option"], ul[role="listbox"] li, [role="menuitem"]')
+
+
+def _ext_is_selecty(el) -> bool:
+    """True if this control is a SELECTION control (dropdown / listbox / combobox) whose
+    value must be CHOSEN from a popup option list — not a free-text field to type into.
+    This is the core "does the question have options to pick?" check: if yes we open+select.
+    Note: a React-Select combobox HAS aria-autocomplete but is still a fixed-option select —
+    typing a free-text answer into it just lands in the search box and matches 'No options'.
+    The ONE control we type-then-pick is a location/city autocomplete, handled as an explicit
+    exception by the caller (by label), not here."""
+    try:
+        role = (el.get_attribute("role") or "").lower()
+        if role in ("combobox", "listbox", "menu"):
+            return True
+        if el.get_attribute("aria-haspopup"):
+            return True
+        if el.get_attribute("readonly") is not None or (el.get_attribute("aria-readonly") == "true"):
+            return True
+        if el.get_attribute("aria-controls") or el.get_attribute("aria-owns"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _ext_answer_select(page, trigger, label: str, p: dict) -> bool:
+    """Open a custom dropdown/combobox, READ its real options, resolve the answer
+    CONSTRAINED to those options, and click the matching one. This is "check the options,
+    then pick" — instead of typing a guessed value into a control that won't store it.
+    Returns True if it selected an option. Leaves already-answered controls untouched."""
+    import re
+    try:
+        cur = (trigger.inner_text() or "").strip()
+        if cur and cur.lower() not in _SELECT_PLACEHOLDERS and not re.search(r"\+\d", cur):
+            return False                       # already shows a chosen value — don't reopen
+        trigger.click()
+        page.wait_for_timeout(350)
+        try:                                   # clear any stray text filtering the list to "No options"
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+            page.wait_for_timeout(200)
+        except Exception:
+            pass
+        opts = []
+        for o in page.query_selector_all(_SELECT_OPTION_SEL):
+            try:
+                if o.is_visible():
+                    t = (o.inner_text() or "").strip()
+                    if t and t.lower() not in _SELECT_PLACEHOLDERS:
+                        opts.append(t)
+            except Exception:
+                continue
+        if not opts:                           # it wasn't really a dropdown — back out
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return False
+        ans = _li_resolve_choice(label, p, opts, allow_sensitive=True)
+        match = _best_option_match(ans, opts) if ans else None
+        if not match:
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return False
+        for o in page.query_selector_all(_SELECT_OPTION_SEL):
+            try:
+                if o.is_visible() and (o.inner_text() or "").strip() == match:
+                    o.click()
+                    page.wait_for_timeout(250)   # let the selection commit + menu close
+                    return True
+            except Exception:
+                continue
+        return False
+    except Exception:
+        return False
+
+
+def _ext_pick_dialcode(page, trigger, country: str = "India", dial: str = "+91") -> bool:
+    """Open a dial-code picker and choose India/+91 DETERMINISTICALLY. Clears any existing
+    filter, types the country, then clicks the option whose text has a WORD-BOUNDARY 'India'
+    (+91 preferred) — so 'British Indian Ocean Territory +246' (merely CONTAINS 'india') is
+    never chosen, and we NEVER blind-press Enter (that's what landed on +246)."""
+    import re
+    try:
+        trigger.click()
+        page.wait_for_timeout(350)
+        try:                                   # clear any pre-existing filter text first
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+        except Exception:
+            pass
+        try:
+            page.keyboard.type(country)        # filter the long country list
+            page.wait_for_timeout(600)
+        except Exception:
+            pass
+        opts = []  # (visible_text, element)
+        for o in page.query_selector_all(
+            '[role="option"], li[role="option"], li, div[class*="option"]'
+        ):
+            try:
+                if o.is_visible():
+                    txt = (o.inner_text() or "").strip()
+                    if txt:
+                        opts.append((txt, o))
+            except Exception:
+                continue
+        for txt, o in opts:                    # 1. India row that also shows +91
+            if re.search(r"\bindia\b", txt.lower()) and dial in txt:
+                o.click()
+                return True
+        for txt, o in opts:                    # 2. any India row (word-boundary, not 'Indian')
+            if re.search(r"\bindia\b", txt.lower()):
+                o.click()
+                return True
+        try:
+            page.keyboard.press("Escape")      # India not found — do NOT pick a wrong row
+        except Exception:
+            pass
+        return False
+    except Exception:
+        return False
+
+
+def _ext_set_phone_country(page, country: str = "India", iso: str = "in",
+                           dial: str = "+91") -> bool:
+    """Set a phone's country/dial-code selector to India/+91 — the dial-code control, NOT
+    the number field. Handles BOTH classic intl-tel-input (the flag dropdown) and the
+    modern Greenhouse layout where the dial code is a separate 'Country' combobox that
+    currently shows e.g. '+246'. Returns True if it set the country."""
+    import re
+    # A) classic intl-tel-input flag dropdown
+    try:
+        trig = (page.query_selector(".iti__selected-country")
+                or page.query_selector(".iti__selected-flag"))
+        if trig and trig.is_visible():
+            trig.click()
+            page.wait_for_timeout(250)
+            opt = page.query_selector(f'li.iti__country[data-country-code="{iso}"]')
+            if opt:
+                opt.click()
+                return True
+            page.keyboard.type(country)
+            page.wait_for_timeout(300)
+            opt = page.query_selector(f'li.iti__country[data-country-code="{iso}"]')
+            if opt:
+                opt.click()
+                return True
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # B) a separate 'Country' dial-code combobox (modern Greenhouse). Detect by a '+<digits>'
+    #    trigger OR a 'Country'/'dial' label (on first load it may not show a code yet). An
+    #    address 'Country' combobox getting India here is also correct, so this is safe; the
+    #    later combobox step then skips it as already-answered.
+    try:
+        for trig in page.query_selector_all(
+            '[role="combobox"], div[class*="-control"], div[class*="__control"], '
+            'button[aria-haspopup="listbox"]'
+        ):
+            try:
+                if not trig.is_visible():
+                    continue
+                cur = (trig.inner_text() or "").strip()
+                label = _ext_label_for(page, trig).lower()
+                if re.search(r"\+\d", cur) or "country" in label or "dial" in label:
+                    if _ext_pick_dialcode(page, trig, country, dial):
+                        return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
+def _ext_upload_resume(page, cv: str) -> bool:
+    """Upload the résumé to the RÉSUMÉ file input ONLY — never the cover-letter one.
+    Tries known résumé selectors, then a file input whose name/id/label says resume/cv
+    (and not 'cover'), then any non-cover file input."""
+    for sel in ('#resume', 'input[name="job_application[resume]"]', 'input[name="resume"]',
+                'input[type="file"][data-automation-id*="file-upload-input"]',
+                'input[type="file"][name*="resume" i]', 'input[type="file"][id*="resume" i]',
+                'input[type="file"][name*="cv" i]'):
+        try:
+            fi = page.query_selector(sel)
+            if fi:
+                fi.set_input_files(cv)
+                return True
+        except Exception:
+            continue
+    for want_keyword in (True, False):   # pass 1: must mention resume/cv; pass 2: any non-cover
+        for fi in page.query_selector_all('input[type="file"]'):
+            try:
+                blob = ((fi.get_attribute("name") or "") + " " + (fi.get_attribute("id") or "")
+                        + " " + _ext_label_for(page, fi)).lower()
+                if "cover" in blob or "photo" in blob:
+                    continue
+                if want_keyword and not any(k in blob for k in ("resume", "cv", "upload", "attach")):
+                    continue
+                fi.set_input_files(cv)
+                return True
+            except Exception:
+                continue
+    # 3. a styled "Upload resume" link/button that opens an OS file chooser (Cutshort)
+    for sel in ('a:has-text("Upload resume")', 'button:has-text("Upload resume")',
+                'a:has-text("Upload CV")', 'label:has-text("Upload resume")',
+                ':text("Upload resume")'):   # NOT a bare "Upload" — that matches "Upload another resume"
+        try:
+            trig = page.query_selector(sel)
+            if not trig or not trig.is_visible():
+                continue
+            with page.expect_file_chooser(timeout=6000) as fc:
+                trig.click()
+            fc.value.set_files(cv)
+            page.wait_for_timeout(1500)   # let the upload register
+            return True
+        except Exception:
+            fi = page.query_selector('input[type="file"]')   # maybe it revealed a hidden input
+            if fi:
+                try:
+                    fi.set_input_files(cv)
+                    page.wait_for_timeout(1500)
+                    return True
+                except Exception:
+                    pass
+    return False
+
+
+def _fill_external_form(page, p: dict, upload_cv: bool = True,
+                        company: str = "", role: str = "") -> tuple[int, int, bool]:
+    """Fill a generic ATS application form (only empty fields). Classifies each control by
+    its DOM shape and dispatches accordingly — text fields are typed, but radios / ARIA
+    radios / React comboboxes / phone-country pickers are CLICKED/SELECTED (never typed, or
+    the form won't store them). Cover-letter fields get a generated letter; the résumé
+    upload targets only the résumé input. Idempotent; never submits.
+
+    upload_cv=False skips the file upload (e.g. Cutshort attaches its Talent-Card résumé)."""
+    import re
     filled = total = 0
+
+    # 0. phone country code -> India (before the number; intl-tel reformats on change)
+    try:
+        _ext_set_phone_country(page)
+    except Exception:
+        pass
+
+    # 1. free-text inputs + textareas — skip selection controls and the cover-letter box
     for el in page.query_selector_all(
         'input[type="text"], input[type="email"], input[type="tel"], input[type="url"], '
-        'input:not([type]), textarea'
+        'input[type="number"], input:not([type]), textarea'
     ):
         try:
             if not el.is_visible() or (el.input_value() or "").strip():
                 continue
+            ph = (el.get_attribute("placeholder") or "").lower()
+            if any(k in ph for k in ("start typing", "type a city", "add a ", "search ")):
+                continue   # chip/tag typeahead (e.g. Cutshort office-preference cities) — don't add to it
+            is_autocomplete = bool(el.get_attribute("aria-autocomplete"))
         except Exception:
             continue
         label = _ext_label_for(page, el)
-        if not label:
+        if not label or any(k in label.lower() for k in _COVER_LETTER_MARKERS):
+            continue   # cover letter handled in step 5
+        is_location = any(k in label.lower() for k in ("location", "city", "town"))
+        # A selection control (country dial-code, "which best describes…" levels) is OPENED
+        # and picked in step 3 — NEVER typed (a free-text answer in its search box just
+        # matches "No options"). The one exception is a location/city autocomplete, which we
+        # DO type then pick (its options are dynamic and only appear after you type).
+        if _ext_is_selecty(el) and not is_location:
             continue
         total += 1
-        val = _li_resolve_text(label, p)
+        val = _li_resolve_text(label, p, allow_sensitive=True)
         if val:
             try:
                 _human_fill(el, str(val), page)
                 filled += 1
+                if is_location or is_autocomplete:   # typeahead -> pick the suggestion
+                    _ext_pick_typeahead(page, el, str(val))
             except Exception:
                 pass
 
+    # 2. native <select> dropdowns
     for sel in page.query_selector_all("select"):
         try:
             if not sel.is_visible():
@@ -1094,51 +1622,139 @@ def _fill_external_form(page, p: dict, upload_cv: bool = True) -> tuple[int, int
             s_opts = [o for o in s_opts if o and o.lower() not in ("select an option", "select", "")]
         except Exception:
             s_opts = []
-        val = _li_resolve_text(s_label, p, options=s_opts)
+        val = _li_resolve_text(s_label, p, options=s_opts, allow_sensitive=True)
         if not val:
             continue
+        choice = _best_option_match(str(val), s_opts) or str(val)
         try:
-            sel.select_option(label=str(val))
-            filled += 1
+            sel.select_option(label=choice); filled += 1
         except Exception:
             try:
-                sel.select_option(value=str(val))
-                filled += 1
+                sel.select_option(value=choice); filled += 1
             except Exception:
                 pass
 
-    # radio / multiple-choice fieldsets (e.g. "Are you currently working?" Yes/No)
-    for fs in page.query_selector_all("fieldset"):
+    # 3. custom dropdowns / comboboxes / listboxes (NOT native <select>) — OPEN the control,
+    #    READ its real options, resolve the answer constrained to them, then CLICK the option.
+    #    Broad selector set so non-React custom dropdowns are caught too (the "typed Yes into a
+    #    dropdown" bug was a custom dropdown that didn't match the old React-only selectors).
+    for trig in page.query_selector_all(
+        '[role="combobox"], [role="listbox"], [aria-haspopup="listbox"], '
+        '[aria-haspopup="menu"], [aria-haspopup="true"], '
+        'div[class*="-control"], div[class*="__control"], '
+        'div[class*="select__"], button[class*="select" i], div[class*="dropdown" i]'
+    ):
         try:
-            legend = fs.query_selector("legend")
-            q = (legend.inner_text() if legend else "").strip()
+            if not trig.is_visible():
+                continue
+            if re.search(r"\+\d", (trig.inner_text() or "")):
+                continue   # phone dial-code picker — already handled in step 0
+            label = _ext_label_for(page, trig)
+            if not label or any(k in label.lower() for k in _COVER_LETTER_MARKERS):
+                continue
+            if any(k in label.lower() for k in ("location", "city", "town")):
+                continue   # location autocomplete is handled in step 1 (type + pick)
+            total += 1
+            if _ext_answer_select(page, trig, label, p):
+                filled += 1
+        except Exception:
+            continue
+
+    # 4. radio / yes-no groups (native, ARIA, custom) — CLICK the option
+    for group in page.query_selector_all('fieldset, [role="radiogroup"]'):
+        try:
+            legend = group.query_selector("legend")
+            q = ((legend.inner_text() if legend else "")
+                 or group.get_attribute("aria-label") or "").strip() or _ext_label_for(page, group)
             if not q:
                 continue
             total += 1
             labels = [t for t in
-                      ((lab.inner_text() or "").strip() for lab in fs.query_selector_all("label"))
-                      if t]
-            ans = _li_resolve_choice(q, p, labels)
+                      ((l.inner_text() or "").strip()
+                       for l in group.query_selector_all('label, [role="radio"], button')) if t]
+            ans = _li_resolve_choice(q, p, labels, allow_sensitive=True)
+            if ans and _ext_click_choice(group, ans):
+                filled += 1
+        except Exception:
+            continue
+
+    # 4b. native radios grouped by `name` (forms without <fieldset>, e.g. Cutshort's
+    #     "Employment status" / remote-timezone). Question = nearest preceding heading.
+    seen_names = set()
+    for radio in page.query_selector_all('input[type="radio"]'):
+        try:
+            name = radio.get_attribute("name") or ""
+            if not name or name in seen_names:
+                continue
+            seen_names.add(name)
+            opts = page.query_selector_all(f'input[type="radio"][name="{name}"]')
+            if len(opts) < 2:
+                continue
+            q = (radio.evaluate(
+                """e => { let n = e.closest('div,section,fieldset') || e.parentElement;
+                    for (let i=0;i<5 && n;i++){ const h = n.querySelector &&
+                      n.querySelector('label,legend,h1,h2,h3,h4,h5,strong,b,p');
+                      const t = h ? (h.innerText||'').trim() : '';
+                      if (t && t.length < 70) return t; n = n.parentElement; } return ''; }"""
+            ) or "").strip()
+            labels = []
+            for o in opts:
+                oid = o.get_attribute("id")
+                lab = page.query_selector(f'label[for="{oid}"]') if oid else None
+                labels.append(((lab.inner_text() if lab else "") or o.get_attribute("value") or "").strip())
+            labels = [l for l in labels if l]
+            if not q or not labels:
+                continue
+            total += 1
+            ans = _li_resolve_choice(q, p, labels, allow_sensitive=True)
             if not ans:
                 continue
-            for lab in fs.query_selector_all("label"):
-                if ans.lower() in ((lab.inner_text() or "").strip().lower()):
-                    lab.click()
+            target = (_best_option_match(ans, labels) or ans).strip().lower()
+            for o in opts:
+                oid = o.get_attribute("id")
+                lab = page.query_selector(f'label[for="{oid}"]') if oid else None
+                txt = ((lab.inner_text() if lab else "") or o.get_attribute("value") or "").strip().lower()
+                if txt and (txt == target or target in txt):
+                    (lab or o).click()
                     filled += 1
                     break
         except Exception:
             continue
 
+    # 4c. agreement / declaration checkboxes — tick them so the form can proceed
+    for cb in page.query_selector_all('input[type="checkbox"]'):
+        try:
+            if not cb.is_visible() or cb.is_checked():
+                continue
+            cid = cb.get_attribute("id")
+            lab = page.query_selector(f'label[for="{cid}"]') if cid else None
+            txt = ((lab.inner_text() if lab else "") or _ext_label_for(page, cb)).lower()
+            if any(k in txt for k in ("i hereby", "i agree", "i declare", "i confirm",
+                                      "i consent", "terms", "true, complete", "accurate")):
+                (lab or cb).click()
+                filled += 1
+        except Exception:
+            continue
+
+    # 5. cover-letter textarea -> a generated letter
+    try:
+        for ta in page.query_selector_all("textarea"):
+            if not ta.is_visible() or (ta.input_value() or "").strip():
+                continue
+            if any(k in _ext_label_for(page, ta).lower() for k in _COVER_LETTER_MARKERS):
+                letter = _ext_cover_letter(p, company, role)
+                if letter:
+                    _human_fill(ta, letter, page)
+                    filled += 1
+                break
+    except Exception:
+        pass
+
+    # 6. résumé upload — the résumé input ONLY (never the cover-letter file field)
     attached = False
     cv = _cv_abspath()
     if upload_cv and cv:
-        for fi in page.query_selector_all('input[type="file"]'):
-            try:
-                fi.set_input_files(cv)
-                attached = True
-                break
-            except Exception:
-                continue
+        attached = _ext_upload_resume(page, cv)
     return filled, total, attached
 
 
@@ -1233,28 +1849,21 @@ def _ext_submitted(page, before_url: str) -> bool:
         return False
 
 
-def _external_autosubmit(page, p: dict) -> str:
+def _external_autosubmit(page, p: dict, company: str = "", role: str = "") -> str:
     """Drive a generic ATS apply form to submission. Returns:
     'submitted' | 'skipped:<reason>' | 'captcha_stop' | 'error:<msg>'."""
     try:
-        page.wait_for_timeout(1800)
+        page.wait_for_timeout(1200)
         if _ats_is_blocked(page):
             return "captcha_stop"
-        # 1. upload the CV FIRST (beat the resume parse-race), then let it settle
+        # 1. upload the RÉSUMÉ first (résumé input only), beating the parse-race
         cv = _cv_abspath()
-        if cv:
-            for fi in page.query_selector_all('input[type="file"]'):
-                try:
-                    fi.set_input_files(cv)
-                    page.wait_for_timeout(3500)
-                    break
-                except Exception:
-                    continue
-        # 2. fill labelled fields via the resolver; two passes re-assert parser-overwrites
-        for _ in range(2):
-            _fill_external_form(page, p)
-            page.wait_for_timeout(700)
-        _human_dwell(page)
+        if cv and _ext_upload_resume(page, cv):
+            page.wait_for_timeout(2000)
+        # 2. fill — two quick passes re-assert any résumé-parser overwrite (no re-upload)
+        _fill_external_form(page, p, upload_cv=False, company=company, role=role)
+        page.wait_for_timeout(500)
+        _fill_external_form(page, p, upload_cv=False, company=company, role=role)
         # 3. never submit an incomplete application — leave it for the assisted flow
         if _ext_missing_required(page) > 0:
             return "skipped:required-unanswered"
@@ -1267,8 +1876,8 @@ def _external_autosubmit(page, p: dict) -> str:
         except Exception:
             return "skipped:submit-click-failed"
         # 4. confirm — the invisible captcha can silently eat the submit
-        for _ in range(14):
-            page.wait_for_timeout(1000)
+        for _ in range(10):
+            page.wait_for_timeout(800)
             if _ats_is_blocked(page):
                 return "captcha_stop"
             if _ext_submitted(page, before):
@@ -1299,7 +1908,7 @@ def _find_external_apply(page):
     return None
 
 
-def _external_apply_flow(ctx, page, p: dict) -> str:
+def _external_apply_flow(ctx, page, p: dict, company: str = "", role: str = "") -> str:
     """From a LinkedIn job page that is NOT Easy Apply: click 'Apply' (opens the company
     ATS in a new tab), then auto-submit that ATS form. Returns the _external_autosubmit
     outcome, or 'external' if we couldn't reach a fillable form (left for manual)."""
@@ -1315,7 +1924,7 @@ def _external_apply_flow(ctx, page, p: dict) -> str:
             atspage.wait_for_load_state("domcontentloaded", timeout=30_000)
         except Exception:
             pass
-        atspage.wait_for_timeout(1500)
+        atspage.wait_for_timeout(1200)
     except Exception:
         atspage = page if _is_application_page(page) else None
     if atspage is None or not _is_application_page(atspage):
@@ -1325,7 +1934,7 @@ def _external_apply_flow(ctx, page, p: dict) -> str:
             except Exception:
                 pass
         return "external"
-    outcome = _external_autosubmit(atspage, p)
+    outcome = _external_autosubmit(atspage, p, company=company, role=role)
     if atspage is not page:
         try:
             atspage.close()
@@ -1402,6 +2011,113 @@ def linkedin_apply_session(jobs: list[dict], profile: dict) -> list[dict]:
                     break
     except Exception as e:  # noqa: BLE001
         log_event("browser", "li_apply_session", "error", str(e))
+    return results
+
+
+def linkedin_hardapply_session(jobs: list[dict], profile: dict, max_open: int = 12) -> list[dict]:
+    """HARD-APPLY ASSIST: for NON-Easy-Apply LinkedIn jobs, open each, click through to the
+    company ATS (Greenhouse / Lever / Ashby / …), AI-FILL everything it knows (text + select
+    + radio + self-ID + résumé), and HOLD all windows open for the operator to review + Submit.
+    NEVER submits. Re-fills every open ATS tab in a keep-alive loop so later steps fill too.
+
+    Easy-Apply jobs are skipped here (they belong to the auto-apply flow). jobs: [{id,url,
+    company,role}]. Returns one result dict per job."""
+    results = []
+    opened = 0
+    try:
+        with _context(headless=False) as ctx:
+            for idx, j in enumerate(jobs):
+                if opened >= max_open:
+                    break
+                r = {"id": j.get("id"), "company": j.get("company"), "role": j.get("role"),
+                     "easy_apply": False, "opened": False, "filled": 0, "total": 0,
+                     "needs_login": False, "error": ""}
+                page = ctx.pages[0] if (idx == 0 and ctx.pages) else ctx.new_page()
+                try:
+                    if not _safe_goto(page, j["url"]):
+                        r["error"] = "page failed to load"
+                        results.append(r)
+                        continue
+                    page.wait_for_timeout(1500)
+                    if any(s in page.url.lower() for s in ("login", "authwall", "checkpoint")):
+                        r["needs_login"] = True
+                        results.append(r)
+                        break
+                    if _find_easy_apply(page):
+                        r["easy_apply"] = True   # Easy Apply -> use the auto-apply flow instead
+                        results.append(r)
+                        continue
+                    ext = _find_external_apply(page)
+                    if not ext:
+                        r["error"] = "no company-apply button found"
+                        results.append(r)
+                        continue
+                    # Click 'Apply' — usually opens the company ATS in a NEW tab; sometimes
+                    # navigates the same tab. Handle both.
+                    atspage = None
+                    try:
+                        with ctx.expect_page(timeout=20_000) as pi:
+                            ext.click()
+                        atspage = pi.value
+                        try:
+                            atspage.wait_for_load_state("domcontentloaded", timeout=30_000)
+                        except Exception:
+                            pass
+                        atspage.wait_for_timeout(1500)
+                    except Exception:
+                        atspage = page if _is_application_page(page) else None
+                    if atspage is None or not _is_application_page(atspage):
+                        r["error"] = "couldn't reach a fillable company form"
+                        if atspage is not None and atspage is not page:
+                            try:
+                                atspage.close()
+                            except Exception:
+                                pass
+                        results.append(r)
+                        continue
+                    if _ats_is_blocked(atspage):
+                        r["error"] = "company site shows a human-verification wall"
+                        results.append(r)
+                        continue
+                    # AI-fill everything (résumé first to beat the parse-race), never submit.
+                    f, t, _att = _fill_external_form(atspage, profile, upload_cv=True,
+                                                     company=j.get("company", ""),
+                                                     role=j.get("role", ""))
+                    r["opened"] = True
+                    r["filled"] = f
+                    r["total"] = t
+                    opened += 1
+                    print(f"  -> {j.get('company')}: company ATS opened, AI-filled {f}/{t} "
+                          f"field(s) — review + Submit yourself.")
+                except Exception as e:  # noqa: BLE001
+                    r["error"] = str(e)[:150]
+                    log_event("browser", "li_hardapply", "error", f"{j.get('company')}: {e}")
+                results.append(r)
+
+            if opened == 0:
+                return results
+            print("\nHARD-APPLY forms are AI-filled. In EACH company tab: review the fields, "
+                  "complete anything highlighted, then click SUBMIT yourself. Later steps keep "
+                  "auto-filling as you go. CLOSE THE WINDOW when done with all of them.")
+            # Keep alive + continuously re-fill every open ATS tab (no re-upload of the résumé).
+            while True:
+                try:
+                    pages = list(ctx.pages)
+                    if not pages:
+                        break
+                    for page in pages:
+                        try:
+                            if page.is_closed():
+                                continue
+                            if _is_application_page(page):
+                                _fill_external_form(page, profile, upload_cv=False)
+                        except Exception:
+                            continue
+                    pages[0].wait_for_timeout(2500)
+                except Exception:
+                    break
+    except Exception as e:  # noqa: BLE001
+        log_event("browser", "li_hardapply_session", "error", str(e))
     return results
 
 
@@ -1576,10 +2292,14 @@ def _safe_goto(page, url: str) -> bool:
 
 
 def linkedin_autoapply_session(jobs: list[dict], profile: dict, max_apply: int = 30,
-                               external_submit: bool = True) -> list[dict]:
-    """AUTONOMOUS: apply to up to `max_apply` Easy Apply jobs end-to-end (submits).
+                               external_submit: bool = False) -> list[dict]:
+    """AUTONOMOUS: apply to up to `max_apply` LinkedIn EASY APPLY jobs end-to-end (submits).
     Skips (discards) any job with an unanswerable required field. Stops on a LinkedIn
     captcha/checkpoint. Human-like delay between applications.
+
+    external_submit=False (default): jobs that are NOT Easy Apply are left alone — their link
+    is recorded (outcome 'external', with 'url') for the operator to apply by hand, instead of
+    auto-driving the company ATS form. Set True to also auto-submit company ATS forms.
 
     jobs: [{"id","url","company","role"}]. Returns one result dict per job attempted."""
     global _AUTOAPPLY_STOP
@@ -1595,6 +2315,12 @@ def linkedin_autoapply_session(jobs: list[dict], profile: dict, max_apply: int =
                     if _AUTOAPPLY_STOP:
                         log_event("browser", "li_autoapply", "stopped", "operator requested stop")
                     break
+                try:   # operator closed the window -> END promptly (don't hammer a dead browser)
+                    if page.is_closed():
+                        log_event("browser", "li_autoapply", "stopped", "browser window closed — ending run")
+                        break
+                except Exception:
+                    break
                 r = {"id": j.get("id"), "company": j.get("company"),
                      "role": j.get("role"), "outcome": "", "error": ""}
                 try:
@@ -1606,7 +2332,10 @@ def linkedin_autoapply_session(jobs: list[dict], profile: dict, max_apply: int =
                         if consecutive_errors >= 4:   # LinkedIn likely throttling — back off
                             log_event("browser", "li_autoapply", "abort", "4 load failures — stopping")
                             break
-                        page.wait_for_timeout(int(_random.uniform(40_000, 95_000)))
+                        try:
+                            page.wait_for_timeout(int(_random.uniform(40_000, 95_000)))
+                        except Exception:
+                            break   # window closed during backoff — END
                         continue
                     consecutive_errors = 0
                     page.wait_for_timeout(1800)
@@ -1624,7 +2353,9 @@ def linkedin_autoapply_session(jobs: list[dict], profile: dict, max_apply: int =
                     if not btn:
                         # Not Easy Apply → try the company ATS form (Greenhouse/Lever/Ashby).
                         if external_submit:
-                            r["outcome"] = _external_apply_flow(ctx, page, profile)
+                            r["outcome"] = _external_apply_flow(
+                                ctx, page, profile, company=j.get("company", ""),
+                                role=j.get("role", ""))
                             r["external"] = True
                             if r["outcome"] == "submitted":
                                 applied += 1
@@ -1637,7 +2368,10 @@ def linkedin_autoapply_session(jobs: list[dict], profile: dict, max_apply: int =
                                 break  # STOP on a bot-wall, don't push further
                         else:
                             r["outcome"] = "external"
-                            print(f"  -> {j.get('company')}: external (auto-submit off)")
+                            r["external"] = True
+                            r["url"] = j.get("url")
+                            print(f"  -> {j.get('company')}: not Easy Apply — link saved "
+                                  f"(apply on company site)")
                     else:
                         btn.click()
                         page.wait_for_selector('div.jobs-easy-apply-modal, div[role="dialog"]', timeout=15_000)
@@ -1647,16 +2381,27 @@ def linkedin_autoapply_session(jobs: list[dict], profile: dict, max_apply: int =
                             applied += 1
                         print(f"  -> {j.get('company')}: {r['outcome']}  ({applied}/{max_apply} submitted)")
                 except Exception as e:  # noqa: BLE001
+                    msg = str(e)
+                    if "has been closed" in msg.lower() or "target page" in msg.lower():
+                        r["outcome"] = "window_closed"
+                        results.append(r)
+                        log_event("browser", "li_autoapply", "stopped",
+                                  "browser window closed mid-run — ending run")
+                        break   # operator closed the window — END, don't hammer a dead browser
                     r["outcome"] = "error"
-                    r["error"] = str(e)[:150]
+                    r["error"] = msg[:150]
                     log_event("browser", "li_autoapply", "error", f"{j.get('company')}: {e}")
                 results.append(r)
                 # human-like pause between applications (anti-ban): non-linear, with an
                 # occasional longer "break" so the cadence never looks machine-regular.
-                pause = _random.uniform(40_000, 95_000)
+                # Tightened for speed (was 40–95s) — faster, but slightly higher ban risk.
+                pause = _random.uniform(18_000, 40_000)
                 if _random.random() < 0.15:
-                    pause += _random.uniform(60_000, 150_000)
-                page.wait_for_timeout(int(pause))
+                    pause += _random.uniform(30_000, 70_000)
+                try:
+                    page.wait_for_timeout(int(pause))
+                except Exception:
+                    break   # window closed during the pause — END the run cleanly
     except Exception as e:  # noqa: BLE001
         log_event("browser", "li_autoapply_session", "error", str(e))
     return results

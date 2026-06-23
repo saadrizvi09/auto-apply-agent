@@ -36,7 +36,7 @@ APPLIED_PATH = ROOT / "platform_applied.json"
 # Force-on for any platform with env PLATFORM_DEBUG=1. The concise per-job outcome line
 # ("-> YC <role>: submitted") always prints regardless.
 _DEBUG_ALL = os.getenv("PLATFORM_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
-_VERBOSE = {"ziprecruiter"}   # not yet live-validated (yc + cutshort are proven)
+_VERBOSE = {"cutshort", "ziprecruiter", "wellfound"}   # cutshort + wellfound still validating live
 
 
 def _verbose(platform: str) -> bool:
@@ -80,6 +80,8 @@ _LOGIN = {
                  "Log into Cutshort (Candidate login), then CLOSE this window."),
     "ziprecruiter": ("https://www.ziprecruiter.com/authn/login",
                      "Log into ZipRecruiter, then CLOSE this window."),
+    "wellfound": ("https://wellfound.com/login",
+                  "Log into Wellfound (ex-AngelList), then CLOSE this window."),
 }
 
 # Where each platform lands when the session is VALID (used to detect logged-in state).
@@ -87,6 +89,7 @@ _HOME = {
     "yc": "https://www.workatastartup.com/companies",
     "cutshort": "https://cutshort.io/jobs",
     "ziprecruiter": "https://www.ziprecruiter.com/candidate/dashboard",
+    "wellfound": "https://wellfound.com/jobs",
 }
 
 # POSITIVE logged-in markers (visible only when signed in) — checked BEFORE any login
@@ -96,6 +99,7 @@ _LOGGED_IN_MARKERS = {
     "yc": ("My profile", "Inbox", "Education"),
     "cutshort": ("My profile", "Logout", "My applications", "Dashboard"),
     "ziprecruiter": ("My ZipRecruiter", "Sign Out", "Saved Jobs", "My Account"),
+    "wellfound": ("Messages", "My profile", "Saved", "For you", "Log out"),
 }
 
 
@@ -241,6 +245,36 @@ def _is_senior_title(title: str) -> bool:
     return any(m in low for m in _YC_SKIP_TITLES)
 
 
+# Off-target titles to skip on EXTERNAL platforms too — the operator wants AI-agent /
+# AI-engineer / software roles, NOT ML/data roles or internships. Mirrors the LinkedIn
+# discovery filters (discovery._EXCLUDE_TITLE_MARKERS / _INTERN_MARKERS). Without this, an
+# unfiltered pool (e.g. Cutshort's broad `python` slug) drifts onto Data Engineer / Robotics
+# Intern / ETL roles. Multi-word markers match as substrings of a space-normalised title;
+# the short "etl" marker is space-padded so it only matches a standalone token.
+_OFF_TARGET_TITLE_MARKERS = (
+    "machine learning", "ml engineer", "ml researcher", "ml scientist", "ml platform",
+    "mlops", "ml ops", "data scientist", "data engineer", "data analyst",
+    "research scientist", "deep learning", " etl ",
+)
+_INTERN_TITLE_MARKERS = ("intern", "internship", "trainee", "apprentice")
+
+
+def _skip_reason(title: str) -> str | None:
+    """Return why this title is off-target for the operator, or None if it's a keeper.
+    Catches internships, ML/data roles, and unreachable senior/exec titles — so external
+    auto-apply only submits AI/software roles a 2026 new-grad actually wants. 'Senior' is
+    intentionally NOT skipped (startups offer it to strong juniors)."""
+    import re
+    low = " " + re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).strip() + " "
+    if any(m in low for m in _INTERN_TITLE_MARKERS):
+        return "intern"
+    if any(m in low for m in _OFF_TARGET_TITLE_MARKERS):
+        return "off-target"
+    if any(m in low for m in _YC_SKIP_TITLES):
+        return "senior-role"
+    return None
+
+
 def _yc_message(profile: dict, company: str, role: str) -> str:
     """A genuinely per-company outreach message (YC ghosts templated blasts). Empty in
     DRY_RUN — the caller then skips, so we never send a blank message."""
@@ -313,10 +347,11 @@ def yc_autoapply(profile: dict, role_key: str, remote: bool, max_apply: int) -> 
                 key = f"yc:{j['url']}"
                 if _already_applied(key):
                     continue
-                if _is_senior_title(j.get("company")):
-                    _dbg("yc", f"  [yc] skipping senior/exec role '{j.get('company')}'")
+                reason = _skip_reason(j.get("company"))
+                if reason:
+                    _dbg("yc", f"  [yc] skipping {reason} role '{j.get('company')}'")
                     results.append({"company": j["company"], "url": j["url"],
-                                    "outcome": "skipped:senior-role", "error": ""})
+                                    "outcome": f"skipped:{reason}", "error": ""})
                     continue
                 r = {"company": j["company"], "url": j["url"], "outcome": "", "error": ""}
                 try:
@@ -428,12 +463,123 @@ def _cutshort_discover(ctx, skill: str, location: str, limit: int) -> list[dict]
     return jobs
 
 
-# Default Cutshort skill sweep when the query is blank — covers the operator's whole
-# target range in one run (each is a /jobs/{slug}-jobs page). Override by typing one or
-# more comma-separated skills in the dashboard box, e.g. "backend, fastapi".
-_CUTSHORT_DEFAULT_SKILLS = ["ai-engineer", "ai-agent", "machine-learning", "llm",
-                            "software-developer", "backend-developer",
-                            "full-stack-developer", "python", "react"]
+# Default Cutshort skill sweep when the query is blank — the operator targets AI-engineering
+# roles, so lead with AI/LLM/agent skill slugs (each is a /jobs/{slug}-jobs page; all verified
+# to return HTTP 200). Override by typing comma-separated skills in the dashboard box,
+# e.g. "langchain, fastapi". `python` and `fastapi` are kept at the end because they return a
+# large AI-backend pool (verified live) so a run still finds volume even if the narrow AI
+# slugs are thin that day. ML/data-only slugs (machine-learning, data-science) are deliberately
+# excluded — the operator does not want ML-engineer / data roles.
+_CUTSHORT_DEFAULT_SKILLS = ["artificial-intelligence", "generative-ai", "llm", "langchain",
+                            "ai-engineer", "nlp", "python", "fastapi"]
+
+
+def _cutshort_applied(page) -> bool:
+    """Best-effort: did the Cutshort application ACTUALLY go through? (success text, an
+    'Applied' badge, or the apply button flipping to Applied/Withdraw). Used so we never
+    mark 'submitted' just for clicking — clicking 'Apply now' only opens the verify modal."""
+    try:
+        body = (page.inner_text("body") or "").lower()
+        if any(s in body for s in ("application sent", "successfully applied", "you have applied",
+                                   "application submitted", "applied successfully",
+                                   "thank you for applying", "your application has been",
+                                   "we have shared your", "message sent", "your message has been sent",
+                                   "message has been sent", "sent your application")):
+            return True
+        for sel in ('button:has-text("Applied")', 'button:has-text("Withdraw")',
+                    ':text("Applied on")', ':text("You applied")'):
+            if page.query_selector(sel):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _cutshort_tick_declaration(page) -> bool:
+    """Tick the required 'I hereby declare…' consent checkbox (native or custom)."""
+    markers = ("hereby", "declare", "true, complete", "true complete",
+               "correct to the best", "i agree", "i consent")
+    # 1. a native checkbox whose surrounding text is the declaration — walk up for the text
+    for cb in page.query_selector_all('input[type="checkbox"]'):
+        try:
+            if cb.is_checked():
+                continue
+            t = (cb.evaluate(
+                "e => { let n=e; for(let i=0;i<6&&n;i++){ n=n.parentElement; "
+                "if(n && (n.innerText||'').length>20) return n.innerText; } return ''; }"
+            ) or "").lower()
+            if any(k in t for k in markers):
+                try:
+                    cb.check()
+                except Exception:
+                    cb.click()
+                return True
+        except Exception:
+            continue
+    # 2. custom checkbox: find the declaration text, click the checkbox-ish control in its row
+    try:
+        decl = (page.query_selector('text=/i hereby declare/i')
+                or page.query_selector('text=/true, complete and correct/i'))
+        if decl:
+            cont = decl.evaluate_handle("e => e.closest('div,label,li,section')").as_element()
+            if cont:
+                box = (cont.query_selector('input[type="checkbox"]')
+                       or cont.query_selector('[role="checkbox"]'))
+                if box:
+                    try:
+                        box.check()
+                    except Exception:
+                        box.click()
+                    return True
+                cont.click()   # last resort: click the row (often toggles the checkbox)
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _cutshort_verify(page, profile: dict) -> int:
+    """Complete Cutshort's 'verify your data' modal: upload the (Required) résumé, select
+    the Employment-status option by text (custom radios), and tick the (Required)
+    declaration. Returns the number of actions taken."""
+    clicked = 0
+    # 1. résumé (Required) — upload ONLY if one isn't already attached (Cutshort shows
+    #    "Upload another resume" + the filename once attached; re-uploading re-triggers the
+    #    signedUrl error and is unnecessary).
+    try:
+        already = (page.query_selector('text=/upload another resume/i')
+                   or page.query_selector('text=/resume_/i')
+                   or page.query_selector('text=/\\.pdf/i'))
+        cv = browser._cv_abspath()
+        if cv and not already and browser._ext_upload_resume(page, cv):
+            clicked += 1
+    except Exception:
+        pass
+    # 2. employment status — click the desired option by text (default: Not working currently,
+    #    which avoids the notice-period date field that "On notice period" demands)
+    emp = profile.get("employment_status", "Not working currently")
+    try:
+        el = page.query_selector(f'text="{emp}"')
+        if el and el.is_visible():
+            el.click()
+            clicked += 1
+    except Exception:
+        pass
+    # 2b. if "Work remotely" is enabled, pick "In any timezone"
+    try:
+        tz = page.query_selector('text="In any timezone"')
+        if tz and tz.is_visible():
+            tz.click()
+            clicked += 1
+    except Exception:
+        pass
+    # 3. declaration / consent checkbox (Required)
+    try:
+        if _cutshort_tick_declaration(page):
+            clicked += 1
+    except Exception:
+        pass
+    return clicked
 
 
 def cutshort_autoapply(profile: dict, query: str, remote: bool, max_apply: int) -> list[dict]:
@@ -470,9 +616,11 @@ def cutshort_autoapply(profile: dict, query: str, remote: bool, max_apply: int) 
                 key = f"cutshort:{j['url']}"
                 if _already_applied(key):
                     continue
-                if _is_senior_title(j.get("company")):
+                reason = _skip_reason(j.get("company"))
+                if reason:
+                    _dbg("cutshort", f"  [cutshort] skipping {reason} role '{j.get('company')}'")
                     results.append({"company": j["company"], "url": j["url"],
-                                    "outcome": "skipped:senior-role", "error": ""})
+                                    "outcome": f"skipped:{reason}", "error": ""})
                     continue
                 r = {"company": j["company"], "url": j["url"], "outcome": "", "error": ""}
                 try:
@@ -517,56 +665,261 @@ def cutshort_autoapply(profile: dict, query: str, remote: bool, max_apply: int) 
                         if video:
                             r["outcome"] = "skipped:video-interview-manual"
                         else:
-                            ta = page.query_selector('textarea')   # optional cover note
-                            if ta and not (ta.input_value() or "").strip():
-                                note = _yc_message(profile, j["company"] or "your team",
-                                                   j.get("role") or "this role")
-                                if note:
-                                    _react_fill(ta, note)
-                            # screening fields (fills + learns); skip cv upload — Cutshort
-                            # attaches the Talent Card résumé, re-uploading cv.pdf errors.
-                            browser._fill_external_form(page, profile, upload_cv=False)
-                            page.wait_for_timeout(700)
-                            missing = browser._ext_missing_required(page)
-                            _dbg("cutshort", f"  [cutshort] {j['company']}: required-unanswered = {missing}")
-                            if missing > 0:
-                                r["outcome"] = "skipped:required-unanswered"
-                            else:
-                                sub = None
-                                for sel in ('button:has-text("Apply now")',
+                            # The job-page "Apply now" only OPENS Cutshort's "verify your
+                            # data" modal; the real submit is completing it ("Save and
+                            # continue" → … ). Click through the wizard and ONLY mark
+                            # submitted when a real success signal appears (never on a click).
+                            outcome = "skipped:no-submit"
+                            for step in range(6):
+                                if browser._ats_is_blocked(page):
+                                    outcome = "captcha_stop"; break
+                                if _cutshort_applied(page):
+                                    outcome = "submitted"; break
+                                ta = page.query_selector('textarea')   # optional cover note
+                                if ta and not (ta.input_value() or "").strip():
+                                    note = _yc_message(profile, j["company"] or "your team",
+                                                       j.get("role") or "this role")
+                                    if note:
+                                        _react_fill(ta, note)
+                                # fill profile/screening/radios/declaration; upload résumé too
+                                browser._fill_external_form(page, profile, upload_cv=True,
+                                                            company=j.get("company", ""),
+                                                            role=j.get("role", ""))
+                                cv_clicks = _cutshort_verify(page, profile)  # custom radios by text
+                                page.wait_for_timeout(900)
+                                miss = browser._ext_missing_required(page)
+                                # forward button — modal steps FIRST, final submit last, so we
+                                # advance the wizard instead of re-clicking the page's Apply now
+                                fwd, fwd_txt = None, None
+                                for sel in ('button:has-text("Save and continue")',
+                                            'button:has-text("Save & continue")',
+                                            'button:has-text("Continue")',
+                                            'button:has-text("Next")',
+                                            'button:has-text("Send")',           # final: message-to-founder screen
                                             'button:has-text("Submit application")',
-                                            'button:has-text("Send application")',
-                                            'button:has-text("Apply to this job")',
                                             'button:has-text("Submit")',
-                                            'button:has-text("Confirm")'):
+                                            'button:has-text("Confirm")',
+                                            'button:has-text("Apply now")'):
                                     el = page.query_selector(sel)
-                                    if el and el.is_visible():
-                                        sub = el
+                                    if el and el.is_visible() and el.get_attribute("disabled") is None:
+                                        fwd, fwd_txt = el, (el.inner_text() or "").strip()
                                         break
-                                sub = sub or browser._ext_submit_button(page)
-                                _dbg("cutshort", f"  [cutshort] {j['company']}: submit button = {bool(sub)}")
-                                if not sub:
-                                    r["outcome"] = "skipped:no-submit"
-                                else:
-                                    sub.click()
-                                    page.wait_for_timeout(2500)
+                                _dbg("cutshort", f"  [cutshort] {j['company']}: step {step+1} "
+                                                 f"verify-clicks={cv_clicks} missing={miss} fwd={fwd_txt!r}")
+                                if fwd and miss == 0:
+                                    fwd.click()
+                                    page.wait_for_timeout(2200)
                                     if browser._ats_is_blocked(page):
-                                        r["outcome"] = "captcha_stop"
-                                    else:
-                                        r["outcome"] = "submitted"
-                                        applied += 1
-                                        _mark_applied("cutshort", key, j["company"])
+                                        outcome = "captcha_stop"; break
+                                    if _cutshort_applied(page):
+                                        outcome = "submitted"; break
+                                    continue
+                                outcome = ("skipped:required-unanswered" if miss > 0
+                                           else "skipped:no-submit")
+                                break
+                            r["outcome"] = outcome
+                            if outcome == "submitted":
+                                applied += 1
+                                _mark_applied("cutshort", key, j["company"])
                 except Exception as e:  # noqa: BLE001
                     r["outcome"] = "error"; r["error"] = str(e)[:150]
                 results.append(r)
-                tag = "SUBMITTED" if r["outcome"] == "submitted" else r["outcome"]
-                _say(f"  -> Cutshort {r['company']}: {tag}"
-                     + (f" ({applied}/{max_apply})" if r["outcome"] == "submitted" else ""))
+                if r["outcome"] == "submitted":
+                    tag = f"SUBMITTED ({applied}/{max_apply})"
+                elif r["outcome"] == "error":
+                    tag = f"error — {r.get('error', '')}"   # show WHY it errored
+                else:
+                    tag = r["outcome"]
+                _say(f"  -> Cutshort {r['company']}: {tag}")
                 if r["outcome"] == "captcha_stop":
                     break
                 _human_pause(page, 6, 14) if r["outcome"] == "submitted" else page.wait_for_timeout(1000)
     except Exception as e:  # noqa: BLE001
         log_event("platforms", "cutshort_autoapply", "error", str(e))
+    return results
+
+
+# --- Wellfound (ex-AngelList): startup jobs, per-company message apply ------------
+# Wellfound is the strongest board for the operator's target (remote-friendly startups that
+# hire freshers globally). It applies like YC: open a job, click Apply, write a genuine
+# per-company message, Send. Cloudflare-defended, so it STOPS on any challenge. Selectors are
+# best-effort and get refined on the FIRST LIVE RUN (that's why it's in _VERBOSE).
+
+# Map the operator's role text to a Wellfound role slug (/role/r/{slug}). Default to AI.
+_WELLFOUND_ROLE = {
+    "ai engineer": "ai-engineer", "ai": "ai-engineer", "ml": "machine-learning-engineer",
+    "ai ml engineer": "ai-engineer", "machine learning": "machine-learning-engineer",
+    "software engineer": "software-engineer", "backend": "backend-engineer",
+    "backend engineer": "backend-engineer", "frontend": "frontend-engineer",
+    "fullstack": "full-stack-engineer", "full stack": "full-stack-engineer",
+    "data": "data-engineer",
+}
+
+
+def _wellfound_role_slug(query: str) -> str:
+    q = (query or "").strip().lower()
+    if not q:
+        return "ai-engineer"
+    if q in _WELLFOUND_ROLE:
+        return _WELLFOUND_ROLE[q]
+    return q.replace(" ", "-")
+
+
+def _wellfound_message(profile: dict, company: str, role: str) -> str:
+    """A genuine per-company message for a Wellfound application (no greeting/sign-off).
+    Empty in DRY_RUN so the caller skips rather than sending a blank message."""
+    from ..profile import context_block
+    system = (
+        "You write a short, specific job-application note to a startup on Wellfound "
+        "(ex-AngelList). 3-5 sentences, plain text, no greeting or sign-off, first person. "
+        "Reference the company and role concretely and name 1-2 things from the candidate's "
+        "background that fit. Genuine and concise — never generic filler."
+    )
+    user = (f"Candidate:\n{context_block(profile)}\n\nCompany: {company}\nRole: {role}\n\n"
+            "Write the message body only.")
+    try:
+        return (groq_client.chat(system, user, temperature=0.6, max_tokens=220) or "").strip()
+    except Exception as e:  # noqa: BLE001
+        log_event("platforms", "wellfound_message", "error", str(e)[:160])
+        return ""
+
+
+def _wellfound_discover(ctx, role_slug: str, remote: bool, limit: int) -> list[dict]:
+    """Collect Wellfound job-detail links for one role. remote=True biases to worldwide-remote
+    (the operator's top priority). Job links look like /jobs/{id}-{slug}."""
+    import re
+    page = ctx.pages[0] if ctx.pages else ctx.new_page()
+    # Worldwide-remote first, else the plain role page.
+    url = (f"https://wellfound.com/role/r/{role_slug}" if not remote
+           else f"https://wellfound.com/role/remote/{role_slug}")
+    if not browser._safe_goto(page, url):
+        # fall back to the non-remote role page if the remote slug 404s
+        if remote and browser._safe_goto(page, f"https://wellfound.com/role/r/{role_slug}"):
+            pass
+        else:
+            _dbg("wellfound", f"  [wellfound] listing failed to load: {url}")
+            return []
+    page.wait_for_timeout(3000)
+    if browser._ats_is_blocked(page):
+        _dbg("wellfound", "  [wellfound] blocked on listing (Cloudflare)")
+        return []
+    for _ in range(6):  # infinite scroll
+        page.mouse.wheel(0, 4000)
+        page.wait_for_timeout(1200)
+    _shot("wellfound", page, "wellfound_listing.png")
+    anchors = page.query_selector_all('a[href*="/jobs/"]')
+    _dbg("wellfound", f"  [wellfound] found {len(anchors)} /jobs/ anchor(s) on {url}")
+    jobs, seen = [], set()
+    for a in anchors:
+        try:
+            href = a.get_attribute("href") or ""
+            if not re.search(r"/jobs/\d", href):   # real job detail page only
+                continue
+            path = href.split("?")[0]
+            if path in seen:
+                continue
+            seen.add(path)
+            full = href if href.startswith("http") else f"https://wellfound.com{href}"
+            jobs.append({"url": full, "company": (a.inner_text() or "").strip()[:60], "role": role_slug})
+        except Exception:
+            continue
+        if len(jobs) >= max(limit * 3, 3):
+            break
+    _dbg("wellfound", f"  [wellfound] discovered {len(jobs)} job link(s)")
+    return jobs
+
+
+def wellfound_autoapply(profile: dict, query: str, remote: bool, max_apply: int) -> list[dict]:
+    """Apply to Wellfound startups with a per-company message. AI/software only (off-target,
+    intern and senior titles skipped). STOPS on any Cloudflare/login wall. First live run
+    validates the apply modal layout (verbose)."""
+    results = []
+    applied = 0
+    role_slug = _wellfound_role_slug(query)
+    try:
+        with browser._context(headless=False) as ctx:
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            targets = _wellfound_discover(ctx, role_slug, remote, max_apply)
+            if not targets:
+                return [{"company": "-", "outcome": "skipped:no-jobs-found",
+                         "error": "no roles found / not logged in / blocked"}]
+            _say(f"  -> Wellfound: {len(targets)} job(s) found for '{role_slug}' "
+                 f"({'remote' if remote else 'any location'})")
+            for idx, j in enumerate(targets, 1):
+                if applied >= max_apply:
+                    break
+                key = f"wellfound:{j['url']}"
+                if _already_applied(key):
+                    continue
+                reason = _skip_reason(j.get("company"))
+                if reason:
+                    _dbg("wellfound", f"  [wellfound] skipping {reason} role '{j.get('company')}'")
+                    results.append({"company": j["company"], "url": j["url"],
+                                    "outcome": f"skipped:{reason}", "error": ""})
+                    continue
+                r = {"company": j["company"], "url": j["url"], "outcome": "", "error": ""}
+                try:
+                    if not browser._safe_goto(page, j["url"]):
+                        r["outcome"] = "error"; r["error"] = "page load failed"
+                        results.append(r); _say(f"  -> Wellfound {r['company']}: {r['outcome']}"); continue
+                    page.wait_for_timeout(2000)
+                    browser._human_dwell(page)
+                    _shot("wellfound", page, f"wellfound_job_{idx}.png")
+                    if browser._ats_is_blocked(page):
+                        r["outcome"] = "captcha_stop"; results.append(r)
+                        _say(f"  -> Wellfound {r['company']}: captcha_stop — stopping"); break
+                    if any(s in page.url.lower() for s in ("login", "signin", "sign-in")):
+                        r["outcome"] = "needs_login"; results.append(r)
+                        _say(f"  -> Wellfound {r['company']}: needs_login — stopping"); break
+                    btn = (page.query_selector('button:has-text("Apply")')
+                           or page.query_selector('a:has-text("Apply")'))
+                    _dbg("wellfound", f"  [wellfound] {j['company']}: apply button = {bool(btn)}")
+                    if not btn:
+                        r["outcome"] = "skipped:no-apply-button"
+                    else:
+                        company = j["company"] or "this company"
+                        msg = _wellfound_message(profile, company, j.get("role") or "")
+                        _dbg("wellfound", f"  [wellfound] {company}: message = {len(msg)} chars")
+                        if not msg:
+                            r["outcome"] = "skipped:no-message"
+                        else:
+                            btn.click()
+                            try:
+                                page.wait_for_selector('[role="dialog"] textarea, textarea', timeout=12_000)
+                            except Exception:
+                                pass
+                            page.wait_for_timeout(1000)
+                            _shot("wellfound", page, f"wellfound_job_{idx}_modal.png")
+                            ta = (page.query_selector('[role="dialog"] textarea')
+                                  or page.query_selector('textarea'))
+                            if not ta:
+                                r["outcome"] = "skipped:no-message-box"
+                            else:
+                                _react_fill(ta, msg)
+                                page.wait_for_timeout(800)
+                                send = (page.query_selector('[role="dialog"] button:has-text("Send")')
+                                        or page.query_selector('button:has-text("Send application")')
+                                        or page.query_selector('button:has-text("Submit application")')
+                                        or page.query_selector('[role="dialog"] button[type="submit"]'))
+                                if not send or send.get_attribute("disabled") is not None:
+                                    r["outcome"] = "skipped:send-disabled"
+                                else:
+                                    send.click()
+                                    page.wait_for_timeout(2500)
+                                    r["outcome"] = "submitted"
+                                    applied += 1
+                                    _mark_applied("wellfound", key, company)
+                except Exception as e:  # noqa: BLE001
+                    r["outcome"] = "error"; r["error"] = str(e)[:150]
+                results.append(r)
+                tag = (f"SUBMITTED ({applied}/{max_apply})" if r["outcome"] == "submitted"
+                       else (f"error — {r.get('error','')}" if r["outcome"] == "error" else r["outcome"]))
+                _say(f"  -> Wellfound {r['company']}: {tag}")
+                if r["outcome"] == "captcha_stop":
+                    break
+                _human_pause(page, 8, 18) if r["outcome"] == "submitted" else page.wait_for_timeout(1200)
+    except Exception as e:  # noqa: BLE001
+        log_event("platforms", "wellfound_autoapply", "error", str(e))
     return results
 
 

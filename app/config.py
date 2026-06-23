@@ -112,7 +112,7 @@ def load_settings() -> Settings:
         daily_cap=_i(os.getenv("DAILY_CAP"), 20),
         # When False, skip the multi-day warm-up ramp and allow DAILY_CAP from day 1.
         warmup_ramp=_b(os.getenv("WARMUP_RAMP"), True),
-        li_daily_cap=_i(os.getenv("LI_DAILY_CAP"), 30),
+        li_daily_cap=_i(os.getenv("LI_DAILY_CAP"), 50),
         li_warmup_ramp=_b(os.getenv("LI_WARMUP_RAMP"), True),
         send_delay_min=_i(os.getenv("SEND_DELAY_MIN"), 90),
         send_delay_max=_i(os.getenv("SEND_DELAY_MAX"), 180),

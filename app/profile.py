@@ -42,6 +42,8 @@ DEFAULTS: dict[str, str] = {
     "current_ctc": "",
     "notice_period": "",
     "currently_working": "Yes",   # answer to "are you currently working?" (interning counts)
+    "employment_status": "Not working currently",  # Cutshort: Not working / On notice period / Not resigned
+                                                    # ("On notice period" demands a notice-end date)
     "willing_to_relocate": "Yes",
     # Answer bank for autonomous LinkedIn apply (India scope)
     "work_authorized_in": "India",

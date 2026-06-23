@@ -30,9 +30,9 @@ from ..logic import dedupe_postings
 from ..logging_setup import log_event
 
 # Default LinkedIn role queries when the operator leaves the role box blank.
-# Agent-focused: surfaces startups building AI agents/LLM products (many YC-backed),
-# plus backend to catch general early-stage startup hiring.
-DEFAULT_ROLE_QUERIES = ["AI Agents Engineer", "LLM Engineer", "Backend Engineer"]
+# Operator targets AI-agent / AI-engineer / software-engineering roles (NOT ML-engineer or
+# data roles — those are filtered out by _EXCLUDE_TITLE_MARKERS below).
+DEFAULT_ROLE_QUERIES = ["AI Agent Engineer", "AI Engineer", "Software Engineer"]
 # Default geos to search for REMOTE roles when the location box is blank — home
 # market plus US/EU (the remote-from-India cold-outreach targets). 3 roles × 3 geos
 # keeps the per-run LinkedIn request count bounded against rate-limiting.
@@ -55,6 +55,14 @@ _INTERN_MARKERS = ("intern", "internship", "trainee")
 _SENIOR_MARKERS = (
     "staff ", "principal", "director", "vp ", "vice president", "head of",
     "manager", "architect", "lead engineer", "engineering lead", "distinguished",
+)
+# Off-target titles to drop even when a query surfaces them — the operator wants AI-agent /
+# AI-engineer / software-developer roles, NOT ML-engineer or data roles. "ml engineer" also
+# catches "AI/ML Engineer"; "machine learning" catches ML Engineer/Researcher/Scientist.
+_EXCLUDE_TITLE_MARKERS = (
+    "machine learning", "ml engineer", "ml researcher", "ml scientist", "ml platform",
+    "mlops", "ml ops", "data scientist", "data engineer", "data analyst",
+    "research scientist", "deep learning",
 )
 
 # Large enterprises, IT-services/consultancies and staffing agencies dominate
@@ -366,6 +374,7 @@ def discover(filters: dict) -> dict:
         "max_headcount": max_headcount,
         "fetched": 0, "new": 0, "duplicates": 0,
         "below_salary": 0, "interns_skipped": 0, "senior_skipped": 0,
+        "off_target_skipped": 0,
         "big_co_skipped": 0, "too_big_dropped": 0, "urgent_found": 0,
         "hr_emails": 0, "hunter_used": 0, "hunter_remaining": None,
         "dry_run": settings.dry_run, "message": "",
@@ -390,6 +399,9 @@ def discover(filters: dict) -> dict:
         title = (j.get("title") or "").lower()
         if any(m in title for m in _INTERN_MARKERS):
             summary["interns_skipped"] += 1
+            continue
+        if any(m in title for m in _EXCLUDE_TITLE_MARKERS):
+            summary["off_target_skipped"] += 1   # ML-engineer / data role — not what the operator wants
             continue
         if any(m in f"{title} " for m in _SENIOR_MARKERS):
             summary["senior_skipped"] += 1
@@ -447,8 +459,9 @@ def discover(filters: dict) -> dict:
             f"({summary['urgent_found']} flagged urgent/hiring — applied first; "
             f"{summary['hr_emails']} with an HR email); skipped "
             f"{summary['big_co_skipped']} big-co, {summary['too_big_dropped']} too-large, "
-            f"{summary['senior_skipped']} too-senior, {summary['duplicates']} dup, "
-            f"{summary['interns_skipped']} intern, {summary['below_salary']} below {min_lpa:.0f} LPA. "
+            f"{summary['senior_skipped']} too-senior, {summary['off_target_skipped']} off-target "
+            f"(ML/data), {summary['duplicates']} dup, {summary['interns_skipped']} intern, "
+            f"{summary['below_salary']} below {min_lpa:.0f} LPA. "
             f"Hunter left this month: {summary['hunter_remaining']}.{note}"
         )
     log_event("discover", "batch", "ok", summary["message"])

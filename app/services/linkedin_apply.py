@@ -36,19 +36,14 @@ _REMOTE = ("remote", "anywhere", "work from home", "wfh", "distributed")
 
 
 def _in_apply_scope(job: dict) -> bool:
-    """True if the agent should auto-apply: India-located OR remote/global roles (which
-    can be done from India). On-site foreign roles are skipped. For a remote-but-foreign
-    role that still requires local work-authorisation, the work-auth answer ('No' for a
-    foreign country) truthfully filters it out inside the Easy-Apply flow."""
-    loc = (job.get("location") or "").lower()
-    if not loc:
-        return True  # unknown location — let the agent's work-auth answer decide
-    if any(m in loc for m in _REMOTE):
-        return True  # remote / global — in scope even if a country is also named
-    if any(c in loc for c in ("united states", "u.s.", "usa", "united kingdom", " uk ",
-                              "germany", "europe", "canada", "australia", "singapore")):
-        return "india" in loc  # explicitly foreign on-site — only if it also lists India
-    return any(m in loc for m in _INDIA)
+    """Whether the agent should attempt this job. India and remote/global are obviously in
+    scope. Foreign-located jobs are ALSO attempted — because LinkedIn's guest scraper labels
+    REMOTE roles by country (e.g. "United States"), not "Remote", so a remote-US role and an
+    on-site-Tampa role are indistinguishable here. The work-authorisation screening answer
+    ("No" for a country the operator can't work in) then truthfully discards the genuinely
+    on-site-only ones inside the Easy-Apply flow — so the honest filter happens there, not on
+    the location string. Net: attempt everything; let work-auth do the real filtering."""
+    return True
 
 
 def _li_used_today(session) -> int:
@@ -74,8 +69,9 @@ def _li_cap_today(session) -> int:
 
 
 def autoapply() -> dict:
-    """AUTONOMOUS LinkedIn Easy Apply: submit to India-scope Easy-Apply jobs up to the
-    daily ramp cap. Skips (discards) any job with an unanswerable required field."""
+    """AUTONOMOUS LinkedIn Easy Apply: submit to in-scope Easy-Apply jobs up to the daily
+    ramp cap. Skips (discards) any job with an unanswerable required field, and foreign
+    on-site jobs self-discard via the work-authorisation answer."""
     profile = load_profile()
     with get_session() as session:
         cap = _li_cap_today(session)
@@ -89,7 +85,7 @@ def autoapply() -> dict:
                 "message": f"Daily LinkedIn cap reached ({used}/{cap}). Resumes tomorrow."}
     if not jobs:
         return {"ok": True, "submitted": 0,
-                "message": "No India-scope LinkedIn jobs queued. Run ① Find Jobs first."}
+                "message": "No LinkedIn jobs queued for apply. Run ① Find Jobs first."}
 
     jobs = jobs[:remaining]
     if settings.dry_run:
@@ -98,14 +94,18 @@ def autoapply() -> dict:
                 "message": f"DRY RUN — would auto-apply to up to {len(jobs)} job(s) (cap {cap}/day)."}
 
     bank_before = answer_bank.count()
-    results = browser.linkedin_autoapply_session(jobs, profile, max_apply=remaining)
+    # Easy-Apply ONLY: non-Easy-Apply jobs are not auto-filled on the company site — their
+    # link is captured and handed back to the operator.
+    results = browser.linkedin_autoapply_session(jobs, profile, max_apply=remaining,
+                                                 external_submit=False)
     learned = max(0, answer_bank.count() - bank_before)
 
     submitted = [r for r in results if r.get("outcome") == "submitted"]
-    ext_submitted = [r for r in submitted if r.get("external")]
+    externals = [r for r in results if r.get("outcome") == "external" and r.get("url")]
     skipped = [r for r in results if str(r.get("outcome", "")).startswith("skipped")]
     captcha = any(r.get("outcome") == "captcha_stop" for r in results)
     needs_login = any(r.get("outcome") == "needs_login" for r in results)
+    closed = any(r.get("outcome") == "window_closed" for r in results)
 
     with get_session() as session:
         if submitted and not get_setting(session, "li_first_apply_date"):
@@ -130,14 +130,62 @@ def autoapply() -> dict:
         urgent_note = (f" Prioritised {urgent_queued} urgent/hiring post(s) first."
                        if urgent_queued else "")
         learned_note = (f" Learned {learned} new answer(s) for next time." if learned else "")
-        ext_note = (f" {len(ext_submitted)} of those were on company ATS sites."
-                    if ext_submitted else "")
-        msg = (f"Auto-applied to {len(submitted)} job(s); skipped {len(skipped)} "
-               f"(unanswerable/incomplete — listed for manual). Daily cap {cap}."
-               f"{ext_note}{urgent_note}{learned_note}")
+        ext_note = (f" {len(externals)} job(s) are NOT Easy Apply — links below."
+                    if externals else "")
+        closed_note = " You closed the browser window, so the run stopped early." if closed else ""
+        msg = (f"Auto-applied to {len(submitted)} Easy-Apply job(s); skipped {len(skipped)} "
+               f"(unanswerable/incomplete). Daily cap {cap}."
+               f"{ext_note}{closed_note}{urgent_note}{learned_note}")
+        if externals:
+            msg += "\n\nNot Easy Apply — apply on the company site:\n" + "\n".join(
+                f"  • {r.get('company') or 'Job'} ({r.get('role') or ''}): {r.get('url')}"
+                for r in externals)
     log_event("li_autoapply", "batch", "ok", msg)
     return {"ok": True, "submitted": len(submitted), "skipped": len(skipped),
-            "learned": learned, "captcha_stop": captcha, "message": msg}
+            "learned": learned, "captcha_stop": captcha,
+            "external_links": [{"company": r.get("company"), "role": r.get("role"),
+                                "url": r.get("url")} for r in externals],
+            "message": msg}
+
+
+def hard_apply_assisted(limit: int = 12) -> dict:
+    """HARD-APPLY ASSIST: open the NON-Easy-Apply LinkedIn jobs, walk into each company ATS,
+    AI-fill everything known, and HOLD the windows for the operator to review + Submit. Never
+    submits. Targets jobs flagged li_external (by the Easy-Apply run) plus the unapplied queue."""
+    profile = load_profile()
+    with get_session() as session:
+        jobs = linkedin_jobs(session, limit,
+                             statuses=["li_external", "discovered", "email_found"])
+    if not jobs:
+        return {"ok": True, "count": 0,
+                "message": "No LinkedIn jobs queued. Run ① Find Jobs (and Auto-apply) first."}
+
+    if settings.dry_run:
+        log_event("li_hardapply", "batch", "dry_run", f"{len(jobs)} job(s)")
+        return {"ok": True, "count": len(jobs), "dry_run": True,
+                "message": f"DRY RUN — would open up to {len(jobs)} company application(s) and AI-fill them."}
+
+    results = browser.linkedin_hardapply_session(jobs, profile, max_open=limit)
+    opened = [r for r in results if r.get("opened")]
+    easy = [r for r in results if r.get("easy_apply")]
+    needs_login = any(r.get("needs_login") for r in results)
+
+    with get_session() as session:
+        for r in results:
+            if r.get("opened"):
+                set_li_status(session, r["id"], "li_hard_prefilled",
+                              f"company ATS AI-filled {r.get('filled')}/{r.get('total')} — review + submit")
+
+    if needs_login:
+        msg = ("Not logged into LinkedIn. Run:  py -3.11 formtool.py lilogin  "
+               "(log in, close the window), then try again.")
+    else:
+        easy_note = (f" {len(easy)} were Easy Apply (use Auto-apply for those)." if easy else "")
+        msg = (f"Opened {len(opened)} company-site application(s), AI-filled — review + Submit "
+               f"each in the browser.{easy_note}")
+    log_event("li_hardapply", "batch", "ok", msg)
+    return {"ok": True, "count": len(opened), "easy_apply": len(easy),
+            "needs_login": needs_login, "message": msg}
 
 
 def list_targets(limit: int = 10) -> dict:

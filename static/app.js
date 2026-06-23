@@ -282,8 +282,10 @@ function renderLiStatus(state) {
   const res = s && s.result;
   if (res && res.message) {
     box.classList.remove("hidden");
-    const n = res.submitted != null ? res.submitted : "?";
-    box.innerHTML = `<div class="fs-headline">Last run: <strong>${n}</strong> applied</div>` +
+    const isHard = res.submitted == null && res.count != null;
+    const n = res.submitted != null ? res.submitted : (res.count != null ? res.count : "?");
+    const verb = isHard ? "opened to fill" : "applied";
+    box.innerHTML = `<div class="fs-headline">Last run: <strong>${n}</strong> ${verb}</div>` +
                     `<div class="fs-sub">${esc(res.message)}</div>`;
   }
 }
@@ -298,6 +300,27 @@ async function stopLiAuto() {
     setStatus(`Stop failed: ${e.message}`, true);
   } finally {
     if (btn) btn.disabled = false;
+  }
+}
+
+async function runLiHardApply(btn) {
+  if (!confirm(
+    "HARD APPLY (assisted).\n\n" +
+    "This opens your NON-Easy-Apply LinkedIn jobs, walks into each company's application " +
+    "site (Greenhouse / Lever / Ashby / …), and AI-FILLS everything it knows — résumé, " +
+    "dropdowns, self-identification, screening answers. It then HOLDS each window open for " +
+    "you to review and click Submit yourself. It never submits for you.\n\n" +
+    "Make sure you've run `formtool.py lilogin` once. Continue?"
+  )) return;
+  busy(btn, true);
+  setStatus("Opening company-site applications and AI-filling — review + Submit each…");
+  try {
+    const res = await api("/api/linkedin/hardapply", { method: "POST", body: JSON.stringify({ limit: 12 }) });
+    setStatus(res.message || "Hard apply started.");
+  } catch (e) {
+    setStatus(`Hard apply failed: ${e.message}`, true);
+  } finally {
+    busy(btn, false);
   }
 }
 
@@ -573,6 +596,8 @@ function wireButtons() {
 
   const liBtn = $("btn-li-apply");
   if (liBtn) liBtn.addEventListener("click", () => runLiApply(liBtn));
+  const liHard = $("btn-li-hard");
+  if (liHard) liHard.addEventListener("click", () => runLiHardApply(liHard));
   const liAuto = $("btn-li-auto");
   if (liAuto) liAuto.addEventListener("click", () => runLiAutoApply(liAuto));
   const liStop = $("btn-li-stop");

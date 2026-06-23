@@ -100,10 +100,15 @@ _LLM_SYSTEM = (
 )
 
 
-def llm_answer(question: str, profile: dict, options: list[str] | None = None) -> str | None:
+def llm_answer(question: str, profile: dict, options: list[str] | None = None,
+               self_id: bool = False) -> str | None:
     """Ask the LLM to answer one screening question from the profile. Returns the
     answer string, or None to SKIP (the LLM said UNKNOWN, the call failed, or — for a
     multiple-choice question — the answer didn't match any offered option).
+
+    self_id=True marks a voluntary self-identification question (gender/disability/
+    veteran/transgender/…): the LLM answers from the profile when it can, otherwise picks
+    a 'prefer not to say' option (if offered) instead of leaving a required field blank.
 
     Never called in DRY_RUN (groq_client returns '' there) — returns None instead."""
     q = (question or "").strip()
@@ -113,6 +118,11 @@ def llm_answer(question: str, profile: dict, options: list[str] | None = None) -
     user = f"Candidate profile:\n{context_block(profile)}\n\nQuestion: {q}"
     if opts:
         user += "\nChoose exactly one of these options: " + " | ".join(opts)
+    if self_id:
+        user += ("\nThis is a voluntary self-identification question. If the profile "
+                 "clearly implies the answer, answer truthfully (Yes/No or the matching "
+                 "option); if it cannot be determined, choose a 'prefer not to say' / "
+                 "'decline to self-identify' option if offered, otherwise reply 'UNKNOWN'.")
     user += "\nAnswer:"
     try:
         raw = groq_client.chat(_LLM_SYSTEM, user, temperature=0.2, max_tokens=120)

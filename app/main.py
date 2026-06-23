@@ -401,6 +401,25 @@ def api_linkedin_autoapply(background: BackgroundTasks) -> dict:
             "message": "Auto-applying on LinkedIn in the background — watch the window; it stops on a security check."}
 
 
+def _run_li_hardapply(limit: int) -> None:
+    LAST_LI_APPLY["running"] = True
+    try:
+        LAST_LI_APPLY["result"] = linkedin_apply.hard_apply_assisted(limit=limit)
+    finally:
+        LAST_LI_APPLY["running"] = False
+
+
+@app.post("/api/linkedin/hardapply")
+def api_linkedin_hardapply(req: LinkedInApply, background: BackgroundTasks) -> dict:
+    """HARD APPLY (assisted): open the non-Easy-Apply LinkedIn jobs, walk into each company
+    ATS, AI-fill everything known, and HOLD the windows for you to review + Submit. Never submits."""
+    if LAST_LI_APPLY["running"]:
+        return {"started": False, "message": "A LinkedIn run is already in progress."}
+    background.add_task(_run_li_hardapply, max(1, min(req.limit, 25)))
+    return {"started": True,
+            "message": "Opening company-site applications and AI-filling — review + Submit each yourself."}
+
+
 @app.post("/api/linkedin/stop")
 def api_linkedin_stop() -> dict:
     """Ask a running auto-apply to stop after the current job (cooperative)."""
@@ -420,7 +439,7 @@ def api_platforms_status() -> dict:
 
 
 class PlatformApply(BaseModel):
-    platform: str                 # yc | cutshort | ziprecruiter
+    platform: str                 # yc | cutshort | ziprecruiter | wellfound
     query: str = ""               # role / skill / search keywords
     location: str = ""            # ZipRecruiter location (e.g. "Remote")
     remote: bool = True
@@ -443,7 +462,7 @@ def api_platforms_autoapply(req: PlatformApply, background: BackgroundTasks) -> 
     bot-wall). Needs a one-time login via  formtool.py platlogin <platform>."""
     if LAST_PLATFORM["running"]:
         return {"started": False, "message": "A platform apply run is already in progress."}
-    if req.platform not in ("yc", "cutshort", "ziprecruiter"):
+    if req.platform not in ("yc", "cutshort", "ziprecruiter", "wellfound"):
         return {"started": False, "message": f"Unknown platform '{req.platform}'."}
     limit = req.limit if (req.limit and req.limit > 0) else None
     background.add_task(_run_platform_apply, req.platform, req.query, req.location,

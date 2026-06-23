@@ -81,20 +81,18 @@ def test_llm_answer_free_text_numeric(monkeypatch):
 
 # --- widened auto-apply scope: India + remote/global -----------------------------
 
-def test_scope_includes_india_and_remote_global():
+def test_scope_attempts_all_then_workauth_filters():
+    # LinkedIn's guest scraper labels REMOTE jobs by country (not "Remote"), so we can't
+    # distinguish remote-US from on-site-US on the location string. The agent therefore
+    # attempts everything in scope; the work-authorisation screening answer ("No" for a
+    # country the operator can't work in) discards the genuinely on-site-only foreign ones
+    # inside the Easy-Apply flow.
     f = linkedin_apply._in_apply_scope
     assert f({"location": "Bengaluru, India"})
-    assert f({"location": "Remote, United States"})   # remote => doable from India
     assert f({"location": "Remote"})
-    assert f({"location": "Work from home"})
-    assert f({"location": ""})                          # unknown => let work-auth decide
-
-
-def test_scope_excludes_onsite_foreign():
-    f = linkedin_apply._in_apply_scope
-    assert not f({"location": "New York, United States"})
-    assert not f({"location": "London, United Kingdom"})
-    assert not f({"location": "Berlin, Germany"})
+    assert f({"location": "Tampa, FL"})                 # foreign — attempted, work-auth filters
+    assert f({"location": "London, United Kingdom"})
+    assert f({"location": ""})
 
 
 # --- assisted runs teach the bank: what's worth learning -------------------------

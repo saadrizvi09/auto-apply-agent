@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from typing import Iterator, Optional
 
-from sqlalchemy import func
+from sqlalchemy import event, func
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from .config import DB_PATH, settings
@@ -19,8 +19,25 @@ from .models import Application, Company, Contact, SendLog, Setting
 engine = create_engine(
     f"sqlite:///{DB_PATH}",
     echo=False,
-    connect_args={"check_same_thread": False},
+    # timeout: how long the driver waits for a locked DB before raising (seconds).
+    connect_args={"check_same_thread": False, "timeout": 30},
 )
+
+
+@event.listens_for(engine, "connect")
+def _sqlite_pragmas(dbapi_conn, _record):
+    """Make SQLite tolerate concurrent access (scheduler thread + request handlers).
+
+    WAL lets readers and a single writer coexist without blocking each other, and
+    busy_timeout makes a would-be second writer wait its turn (up to 30s) instead of
+    failing immediately with 'database is locked'. synchronous=NORMAL is the safe,
+    fast pairing for WAL. Set on every new connection via the connect event.
+    """
+    cur = dbapi_conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL")
+    cur.execute("PRAGMA busy_timeout=30000")
+    cur.execute("PRAGMA synchronous=NORMAL")
+    cur.close()
 
 
 def init_db() -> None:
@@ -635,17 +652,20 @@ def mark_form_submitted(session: Session, application: Application, note: str = 
     session.add(SendLog(application_id=application.id, ts=now, outcome="form_submitted", detail=note))
 
 
-def linkedin_jobs(session: Session, limit: int = 10) -> list[dict]:
-    """Discovered LinkedIn jobs eligible for the assisted Easy-Apply flow:
-    cold-discovery rows (apply_kind IS NULL) with a LinkedIn posting URL, not yet
-    LinkedIn-applied or archived. Returns [{id, url, company, role}]."""
+def linkedin_jobs(session: Session, limit: int = 10,
+                  statuses: list[str] | None = None) -> list[dict]:
+    """Discovered LinkedIn jobs eligible for an apply flow: cold-discovery rows
+    (apply_kind IS NULL) with a LinkedIn posting URL, not yet LinkedIn-applied or archived.
+    `statuses` selects which application states to include (default the unapplied queue);
+    the hard-apply flow passes li_external too. Returns [{id, url, company, role, ...}]."""
+    statuses = statuses or ["discovered", "email_found"]
     stmt = (
         select(Application, Company)
         .join(Company, Application.company_id == Company.id)
         .where(Application.apply_kind.is_(None))
         .where((Application.archived == 0) | (Application.archived.is_(None)))
         .where(Company.source_url.like("%linkedin.com/jobs%"))
-        .where(Application.status.in_(["discovered", "email_found"]))
+        .where(Application.status.in_(statuses))
     )
     out = []
     for app, company in session.exec(stmt).all():

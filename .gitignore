@@ -3,6 +3,9 @@
 credentials.json
 token.json
 jobs.db
+jobs.db-wal
+jobs.db-shm
+jobs.db-journal
 cv.pdf
 profile.json
 answer_bank.json

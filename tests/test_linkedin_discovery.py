@@ -135,9 +135,10 @@ def test_locations_default_multi_geo_else_override():
     assert discovery._locations({"location": "Berlin"}) == ["Berlin"]
 
 
-def test_default_queries_are_agent_focused():
+def test_default_queries_are_ai_and_software_focused():
     qs = " ".join(discovery.DEFAULT_ROLE_QUERIES).lower()
-    assert "agent" in qs and "llm" in qs
+    assert "agent" in qs and "ai engineer" in qs and "software" in qs
+    assert "ml engineer" not in qs and "machine learning" not in qs
 
 
 def test_senior_markers_cover_unreachable_titles():
@@ -201,3 +202,25 @@ def test_is_hr_matches_recruiting_roles():
 def test_is_hr_rejects_engineers():
     assert not _is_hr("Senior Software Engineer", "engineering")
     assert not _is_hr("CTO", "executive")
+
+
+def test_exclude_title_markers_drops_ml_and_data_roles():
+    """The operator wants AI-agent / AI-engineer / software-developer roles, not ML/data."""
+    from app.services.discovery import _EXCLUDE_TITLE_MARKERS
+
+    def off_target(title: str) -> bool:
+        return any(m in title.lower() for m in _EXCLUDE_TITLE_MARKERS)
+
+    # dropped
+    assert off_target("Machine Learning Engineer")
+    assert off_target("Senior ML Engineer")
+    assert off_target("AI/ML Engineer")
+    assert off_target("Data Engineer")
+    assert off_target("Data Scientist")
+    assert off_target("Applied ML Researcher")
+    # kept (what the operator wants)
+    assert not off_target("AI Engineer")
+    assert not off_target("AI Agent Engineer")
+    assert not off_target("Software Engineer")
+    assert not off_target("Full Stack AI Engineer")
+    assert not off_target("Backend Engineer")
