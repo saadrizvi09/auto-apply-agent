@@ -850,6 +850,50 @@ def _wellfound_discover(ctx, role_slug: str, remote: bool, limit: int) -> list[d
     return jobs
 
 
+# Wellfound disables "Send application" when the job requires in-country work authorization the
+# operator doesn't have (US-only / no visa sponsorship, while the profile needs sponsorship). The
+# apply modal shows a red banner with one of these phrases — detect it to skip cleanly (honest
+# reason, no wasted cover letter) instead of reporting a confusing "send-disabled".
+_WF_BLOCK_MARKERS = (
+    "does not offer visa sponsorship", "require sponsorship", "requires sponsorship",
+    "in-country", "must be located", "not eligible to apply", "all remote workers to be",
+)
+
+
+def _wellfound_blocked(page) -> bool:
+    """True if the open apply modal shows a work-authorization / visa eligibility block.
+    Reads BOTH the dialog and the body text, each in its own try — a stale dialog handle
+    (react re-render mid-batch) must not suppress detection, and the banner shows in both."""
+    texts = []
+    try:
+        dlg = page.query_selector('[role="dialog"]')
+        if dlg:
+            texts.append(dlg.inner_text() or "")
+    except Exception:
+        pass
+    try:
+        texts.append(page.inner_text("body") or "")
+    except Exception:
+        pass
+    low = " ".join(texts).lower()
+    return any(m in low for m in _WF_BLOCK_MARKERS)
+
+
+def _wellfound_company(page) -> str:
+    """Best-effort real company NAME from the apply modal / breadcrumb (the discovery
+    anchor text is the job TITLE, not the company — so the message needs this)."""
+    try:
+        for sel in ('[role="dialog"] a[href^="/company/"]', 'a[href^="/company/"]'):
+            el = page.query_selector(sel)
+            if el:
+                t = (el.inner_text() or "").strip()
+                if t:
+                    return t[:60]
+    except Exception:
+        pass
+    return ""
+
+
 def wellfound_autoapply(profile: dict, query: str, remote: bool, max_apply: int) -> list[dict]:
     """Apply to Wellfound startups with a per-company message. AI/software only (off-target,
     intern and senior titles skipped). STOPS on any Cloudflare/login wall. First live run
@@ -898,38 +942,56 @@ def wellfound_autoapply(profile: dict, query: str, remote: bool, max_apply: int)
                     if not btn:
                         r["outcome"] = "skipped:no-apply-button"
                     else:
-                        company = j["company"] or "this company"
-                        msg = _wellfound_message(profile, company, j.get("role") or "")
-                        _dbg("wellfound", f"  [wellfound] {company}: message = {len(msg)} chars")
-                        if not msg:
-                            r["outcome"] = "skipped:no-message"
+                        btn.click()
+                        try:
+                            page.wait_for_selector('[role="dialog"] textarea, textarea', timeout=12_000)
+                        except Exception:
+                            pass
+                        # Eligibility gate FIRST: Wellfound hard-disables Send for US-in-country /
+                        # no-sponsorship roles the operator can't legally take (profile needs
+                        # sponsorship). The red banner renders a beat AFTER the modal, so POLL for it
+                        # (up to ~4.5s, breaking early when found) and skip with an honest reason
+                        # BEFORE spending a Groq cover letter — a fixed wait raced the banner.
+                        wf_blocked = False
+                        for _ in range(9):
+                            page.wait_for_timeout(500)
+                            if _wellfound_blocked(page):
+                                wf_blocked = True
+                                break
+                        _shot("wellfound", page, f"wellfound_job_{idx}_modal.png")
+                        if wf_blocked:
+                            r["outcome"] = "skipped:work-auth-blocked"
+                            _dbg("wellfound", f"  [wellfound] {j['company']}: visa / in-country block")
                         else:
-                            btn.click()
-                            try:
-                                page.wait_for_selector('[role="dialog"] textarea, textarea', timeout=12_000)
-                            except Exception:
-                                pass
-                            page.wait_for_timeout(1000)
-                            _shot("wellfound", page, f"wellfound_job_{idx}_modal.png")
+                            # j['company'] is actually the job TITLE; pull the real company name.
+                            company = _wellfound_company(page) or "this company"
+                            role_title = j.get("company") or j.get("role") or ""
                             ta = (page.query_selector('[role="dialog"] textarea')
                                   or page.query_selector('textarea'))
                             if not ta:
                                 r["outcome"] = "skipped:no-message-box"
                             else:
-                                _react_fill(ta, msg)
-                                page.wait_for_timeout(800)
-                                send = (page.query_selector('[role="dialog"] button:has-text("Send")')
-                                        or page.query_selector('button:has-text("Send application")')
-                                        or page.query_selector('button:has-text("Submit application")')
-                                        or page.query_selector('[role="dialog"] button[type="submit"]'))
-                                if not send or send.get_attribute("disabled") is not None:
-                                    r["outcome"] = "skipped:send-disabled"
+                                msg = _wellfound_message(profile, company, role_title)
+                                _dbg("wellfound", f"  [wellfound] {company}: message = {len(msg)} chars")
+                                if not msg:
+                                    r["outcome"] = "skipped:no-message"
                                 else:
-                                    send.click()
-                                    page.wait_for_timeout(2500)
-                                    r["outcome"] = "submitted"
-                                    applied += 1
-                                    _mark_applied("wellfound", key, company)
+                                    _react_fill(ta, msg)
+                                    page.wait_for_timeout(800)
+                                    send = (page.query_selector('[role="dialog"] button:has-text("Send")')
+                                            or page.query_selector('button:has-text("Send application")')
+                                            or page.query_selector('button:has-text("Submit application")')
+                                            or page.query_selector('[role="dialog"] button[type="submit"]'))
+                                    if not send or send.get_attribute("disabled") is not None:
+                                        # Re-check the banner now (it renders late); relabel honestly.
+                                        r["outcome"] = ("skipped:work-auth-blocked"
+                                                        if _wellfound_blocked(page) else "skipped:send-disabled")
+                                    else:
+                                        send.click()
+                                        page.wait_for_timeout(2500)
+                                        r["outcome"] = "submitted"
+                                        applied += 1
+                                        _mark_applied("wellfound", key, company)
                 except Exception as e:  # noqa: BLE001
                     r["outcome"] = "error"; r["error"] = str(e)[:150]
                 results.append(r)

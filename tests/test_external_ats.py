@@ -234,6 +234,24 @@ def test_wellfound_role_slug_defaults_to_ai():
     assert _wellfound_role_slug("Golang Developer") == "golang-developer"  # slugified fallback
 
 
+def test_wellfound_blocked_detects_visa_banner():
+    """Wellfound disables Send for US-in-country/no-sponsorship roles; detect the banner."""
+    from app.integrations.platforms import _wellfound_blocked
+
+    class _P:
+        def __init__(self, body):
+            self._b = body
+        def query_selector(self, sel):
+            return None              # force the inner_text("body") fallback path
+        def inner_text(self, _sel):
+            return self._b
+
+    assert _wellfound_blocked(_P(
+        "Ravenna Software does not offer visa sponsorship and requires all remote "
+        "workers to be in-country. Your profile indicates you require sponsorship."))
+    assert not _wellfound_blocked(_P("Cover Letter. Tell us why you're a great fit for this role."))
+
+
 def test_wellfound_registered_across_layers():
     from app.integrations import platforms
     from app.services import platform_apply
