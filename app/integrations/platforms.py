@@ -785,6 +785,12 @@ def _wellfound_role_slug(query: str) -> str:
     return q.replace(" ", "-")
 
 
+# Blank-query sweep: AI roles FIRST, then SDE/software-developer roles — the operator wants
+# AI-agent/AI-engineer AND software-developer roles. Each is a /role/r/{slug} page (404-guarded).
+_WELLFOUND_DEFAULT_SLUGS = ["ai-engineer", "software-engineer", "full-stack-engineer",
+                            "backend-engineer"]
+
+
 def _wellfound_message(profile: dict, company: str, role: str) -> str:
     """A genuine per-company message for a Wellfound application (no greeting/sign-off).
     Empty in DRY_RUN so the caller skips rather than sending a blank message."""
@@ -900,15 +906,24 @@ def wellfound_autoapply(profile: dict, query: str, remote: bool, max_apply: int)
     validates the apply modal layout (verbose)."""
     results = []
     applied = 0
-    role_slug = _wellfound_role_slug(query)
+    # Blank query → sweep AI + SDE role slugs; an explicit query → just that role.
+    slugs = [_wellfound_role_slug(query)] if (query or "").strip() else list(_WELLFOUND_DEFAULT_SLUGS)
     try:
         with browser._context(headless=False) as ctx:
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
-            targets = _wellfound_discover(ctx, role_slug, remote, max_apply)
+            targets, seen_urls = [], set()
+            for slug in slugs:
+                for j in _wellfound_discover(ctx, slug, remote, max_apply):
+                    k = j["url"].split("?")[0]
+                    if k not in seen_urls:
+                        seen_urls.add(k)
+                        targets.append(j)
+                if len(targets) >= max(max_apply * 5, 25):
+                    break
             if not targets:
                 return [{"company": "-", "outcome": "skipped:no-jobs-found",
                          "error": "no roles found / not logged in / blocked"}]
-            _say(f"  -> Wellfound: {len(targets)} job(s) found for '{role_slug}' "
+            _say(f"  -> Wellfound: {len(targets)} job(s) found across {len(slugs)} role slug(s) "
                  f"({'remote' if remote else 'any location'})")
             for idx, j in enumerate(targets, 1):
                 if applied >= max_apply:
