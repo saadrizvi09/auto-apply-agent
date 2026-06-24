@@ -252,9 +252,92 @@ def test_wellfound_blocked_detects_visa_banner():
     assert not _wellfound_blocked(_P("Cover Letter. Tell us why you're a great fit for this role."))
 
 
+def test_wellfound_location_restricted_filters_geo_locked_roles():
+    """Skip roles geo-locked outside India BEFORE opening the modal, but never drop a
+    role that still allows India/worldwide remote (the ok-markers veto the skip)."""
+    from app.integrations.platforms import _wellfound_location_restricted
+
+    class _P:
+        def __init__(self, body):
+            self._b = body
+        def inner_text(self, _sel):
+            return self._b
+
+    # Clearly US-only with no global allowance -> restricted.
+    assert _wellfound_location_restricted(_P(
+        "AI Engineer. Remote (US). Must be authorized to work in the United States."))
+    assert _wellfound_location_restricted(_P(
+        "Software Engineer. United States only. US citizen or green card required."))
+    # US company but explicitly hires worldwide / India -> NOT restricted (ok-marker vetoes).
+    assert not _wellfound_location_restricted(_P(
+        "Remote (Worldwide). We're a US company hiring globally. US time-zone overlap nice."))
+    assert not _wellfound_location_restricted(_P(
+        "AI Engineer. Remote — India. Must be authorized to work in the US is NOT required."))
+    # Ordinary unrestricted listing -> NOT restricted.
+    assert not _wellfound_location_restricted(_P(
+        "AI Engineer. Remote. Build LLM agents with FastAPI. Competitive pay."))
+
+
 def test_wellfound_registered_across_layers():
     from app.integrations import platforms
     from app.services import platform_apply
     assert "wellfound" in platforms._LOGIN and "wellfound" in platforms._HOME
     assert "wellfound" in platform_apply._CAPS and platform_apply._CAPS["wellfound"] > 0
     assert hasattr(platforms, "wellfound_autoapply")
+
+
+def test_instahyre_allows_interns_any_salary():
+    """Instahyre applies to every on-target intern regardless of stipend (salary ignored);
+    only off-target / senior titles still drop."""
+    from app.integrations.platforms import _skip_reason
+
+    # on-target interns are kept (no salary gate)
+    assert _skip_reason("Backend Engineer (Internship)", allow_intern=True) is None
+    assert _skip_reason("Full Stack Developer Intern", allow_intern=True) is None
+    assert _skip_reason("Software Development Engineer (Internship)", allow_intern=True) is None
+    # off-target / senior interns still drop
+    assert _skip_reason("C++ Content Writer - Intern (Internship)", allow_intern=True) == "off-target"
+    assert _skip_reason("Senior Data Scientist Intern", allow_intern=True) == "off-target"
+
+
+def test_instahyre_registered_across_layers():
+    from app.integrations import platforms
+    from app.services import platform_apply
+    assert "instahyre" in platforms._LOGIN and "instahyre" in platforms._HOME
+    assert "instahyre" in platforms._LOGGED_IN_MARKERS
+    assert "instahyre" in platform_apply._CAPS and platform_apply._CAPS["instahyre"] > 0
+    assert platform_apply._LABEL.get("instahyre") == "Instahyre"
+    assert hasattr(platforms, "instahyre_autoapply")
+
+
+def test_instahyre_modal_title_and_apply_button():
+    """Modal <h1> is read for _skip_reason; the apply-button matcher picks the 'Apply' CTA
+    and never the 'Not interested' decline control (live flow = View -> modal -> Apply)."""
+    from app.integrations.platforms import _instahyre_modal_title, _instahyre_apply_btn
+
+    class _El:
+        def __init__(self, text, visible=True):
+            self._t = text
+            self._v = visible
+        def inner_text(self):
+            return self._t
+        def is_visible(self):
+            return self._v
+
+    class _Dlg:
+        def __init__(self, mapping):
+            self._m = mapping        # selector -> element
+        def query_selector(self, sel):
+            return self._m.get(sel)
+
+    # Title comes from the modal <h1>.
+    dlg = _Dlg({"h1": _El("Senior AI Engineer")})
+    assert _instahyre_modal_title(dlg) == "Senior AI Engineer"
+
+    # Only "Not interested" present -> matcher returns None (never auto-declines).
+    decline_only = _Dlg({'button:has-text("Apply")': _El("Not interested")})
+    assert _instahyre_apply_btn(decline_only) is None
+
+    # The real 'Apply' CTA is selected.
+    good = _Dlg({'button:has-text("Apply")': _El("Apply")})
+    assert _instahyre_apply_btn(good) is not None

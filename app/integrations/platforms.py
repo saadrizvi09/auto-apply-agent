@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import random as _random
+import re
 
 from ..config import ROOT, settings
 from ..logging_setup import log_event
@@ -36,7 +37,7 @@ APPLIED_PATH = ROOT / "platform_applied.json"
 # Force-on for any platform with env PLATFORM_DEBUG=1. The concise per-job outcome line
 # ("-> YC <role>: submitted") always prints regardless.
 _DEBUG_ALL = os.getenv("PLATFORM_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
-_VERBOSE = {"cutshort", "ziprecruiter", "wellfound"}   # cutshort + wellfound still validating live
+_VERBOSE = {"cutshort", "ziprecruiter", "wellfound", "instahyre"}   # still validating live
 
 
 def _verbose(platform: str) -> bool:
@@ -82,6 +83,8 @@ _LOGIN = {
                      "Log into ZipRecruiter, then CLOSE this window."),
     "wellfound": ("https://wellfound.com/login",
                   "Log into Wellfound (ex-AngelList), then CLOSE this window."),
+    "instahyre": ("https://www.instahyre.com/login/",
+                  "Log into Instahyre (Candidate), then CLOSE this window."),
 }
 
 # Where each platform lands when the session is VALID (used to detect logged-in state).
@@ -90,6 +93,7 @@ _HOME = {
     "cutshort": "https://cutshort.io/jobs",
     "ziprecruiter": "https://www.ziprecruiter.com/candidate/dashboard",
     "wellfound": "https://wellfound.com/jobs",
+    "instahyre": "https://www.instahyre.com/candidate/opportunities/",
 }
 
 # POSITIVE logged-in markers (visible only when signed in) — checked BEFORE any login
@@ -100,6 +104,7 @@ _LOGGED_IN_MARKERS = {
     "cutshort": ("My profile", "Logout", "My applications", "Dashboard"),
     "ziprecruiter": ("My ZipRecruiter", "Sign Out", "Saved Jobs", "My Account"),
     "wellfound": ("Messages", "My profile", "Saved", "For you", "Log out"),
+    "instahyre": ("Opportunities", "My Profile", "Logout", "Recommended", "Applied"),
 }
 
 
@@ -865,6 +870,41 @@ _WF_BLOCK_MARKERS = (
     "in-country", "must be located", "not eligible to apply", "all remote workers to be",
 )
 
+# Proactive location filter, read off the JOB DETAIL PAGE before the apply modal is even
+# opened. The operator is India-based (work-authorized in India only, no sponsorship), so a
+# role explicitly geo-locked to another country with NO worldwide/India allowance is a
+# guaranteed work-auth-block — skip it early (no wasted modal open + ~4.5s banner poll +
+# Groq letter). Conservative by design: a skip marker only fires when NO india/worldwide
+# allowance marker is present, so genuinely global-remote roles are never dropped.
+_WF_LOCATION_SKIP_MARKERS = (
+    "united states only", "u.s. only", "us only", "usa only", "us-only", "us based only",
+    "must be based in the u", "must be located in the u", "must reside in the u",
+    "located in the united states", "based in the united states", "based in the us",
+    "authorized to work in the united states", "authorized to work in the us",
+    "u.s. citizen", "us citizen", "green card", "must be a us ", "must be us ",
+    "uk only", "eu only", "canada only", "us work authorization", "onsite in",
+    "must be in the us", "remote (us)", "remote - us", "remote, us", "remote · united states",
+)
+_WF_LOCATION_OK_MARKERS = (
+    "india", "worldwide", "anywhere", "remote (global", "globally", "any location",
+    "remote anywhere", "asia", "apac", "remote international", "no location requirement",
+)
+
+
+def _wellfound_location_restricted(page) -> bool:
+    """True if the open job-detail page is clearly geo-locked OUTSIDE India with no
+    worldwide/India allowance. Reads the detail body once; a skip marker only counts when
+    NO ok-marker (india / worldwide / anywhere / apac …) is present anywhere on the page,
+    so a US company that still hires globally is NOT dropped. Authoritative work-auth gate
+    is still the in-modal banner (_wellfound_blocked); this just avoids the wasted modal."""
+    try:
+        low = (page.inner_text("body") or "").lower()
+    except Exception:
+        return False
+    if any(ok in low for ok in _WF_LOCATION_OK_MARKERS):
+        return False
+    return any(m in low for m in _WF_LOCATION_SKIP_MARKERS)
+
 
 def _wellfound_blocked(page) -> bool:
     """True if the open apply modal shows a work-authorization / visa eligibility block.
@@ -951,6 +991,15 @@ def wellfound_autoapply(profile: dict, query: str, remote: bool, max_apply: int)
                     if any(s in page.url.lower() for s in ("login", "signin", "sign-in")):
                         r["outcome"] = "needs_login"; results.append(r)
                         _say(f"  -> Wellfound {r['company']}: needs_login — stopping"); break
+                    # Proactive geo filter: skip roles clearly locked outside India BEFORE
+                    # opening the modal (saves a modal open + ~4.5s banner poll + Groq letter).
+                    if _wellfound_location_restricted(page):
+                        r["outcome"] = "skipped:location-restricted"
+                        _dbg("wellfound", f"  [wellfound] {j['company']}: geo-locked outside India")
+                        results.append(r)
+                        _say(f"  -> Wellfound {r['company']}: {r['outcome']}")
+                        page.wait_for_timeout(800)
+                        continue
                     btn = (page.query_selector('button:has-text("Apply")')
                            or page.query_selector('a:has-text("Apply")'))
                     _dbg("wellfound", f"  [wellfound] {j['company']}: apply button = {bool(btn)}")
@@ -1018,6 +1067,292 @@ def wellfound_autoapply(profile: dict, query: str, remote: bool, max_apply: int)
                 _human_pause(page, 8, 18) if r["outcome"] == "submitted" else page.wait_for_timeout(1200)
     except Exception as e:  # noqa: BLE001
         log_event("platforms", "wellfound_autoapply", "error", str(e))
+    return results
+
+
+# --- Instahyre (India: profile-targeted Opportunities feed; View -> modal -> Apply) ---
+# Instahyre's "Opportunities" feed is ALREADY filtered to the operator's profile (role +
+# remote/Delhi-NCR prefs set on the account), so there's no per-skill URL to sweep like
+# Cutshort/Wellfound — the feed IS the targeting (the dashboard query box is unused).
+# LIVE-VALIDATED 2026-06-24: each opportunity ROW has a green "View" button that opens a
+# [role="dialog"] MODAL with the full job + an "Apply" button (applying == sharing the profile
+# with the recruiter). The modal <h1> is the role title; Escape closes the modal. Only off-
+# target / senior titles are skipped — INTERNS ARE ALLOWED and salary is IGNORED (operator's
+# call: apply to every on-target AI/software role regardless of stipend). A short screening step
+# (expected CTC / notice period) after Apply is filled via the shared resolver. ToS-restricted +
+# login-gated; STOPS on any captcha. _VERBOSE.
+
+_INSTAHYRE_DONE_MARKERS = (
+    "interest sent", "interest has been sent", "application sent", "we have shared your profile",
+    "your profile has been shared", "you have shown interest", "interest registered",
+    "successfully applied", "application submitted", "applied successfully",
+    "thank you for applying", "you have applied", "application has been sent",
+    "your application has been", "we've shared your profile",
+)
+
+
+def _instahyre_view_buttons(page) -> list:
+    """The per-row 'View' buttons that open the job modal (one per opportunity)."""
+    out = []
+    for b in page.query_selector_all("button"):
+        try:
+            if b.is_visible() and (b.inner_text() or "").strip().lower().startswith("view"):
+                out.append(b)
+        except Exception:
+            continue
+    return out
+
+
+def _instahyre_modal(page):
+    """The currently-open, VISIBLE job modal, or None. Must scan ALL matches and return the
+    first VISIBLE one — Instahyre keeps a hidden `.modal` wrapper earlier in the DOM, and
+    grabbing that (invisible) element made detection fail while the real modal was open, which
+    in turn made the open-retry re-click onto the background page (the 'scrolling' bug)."""
+    for sel in ('[role="dialog"]', '[uib-modal-window]', '.modal-content', '.modal-dialog',
+                '[class*="modal"]'):
+        try:
+            for el in page.query_selector_all(sel):
+                if el.is_visible():
+                    return el
+        except Exception:
+            continue
+    return None
+
+
+def _instahyre_modal_title(dlg) -> str:
+    """Role title from the open modal — its <h1> (verified), with heading fallbacks."""
+    for sel in ("h1", "h2", "h3", '[class*="title"]'):
+        try:
+            el = dlg.query_selector(sel)
+            if el:
+                t = (el.inner_text() or "").strip()
+                if t:
+                    return t.replace("\n", " ")[:80]
+        except Exception:
+            continue
+    return ""
+
+
+def _instahyre_modal_company(dlg) -> str:
+    """Best-effort company name from the open modal (for the log + dedupe key)."""
+    for sel in ('[class*="company-name"]', '[class*="company"]', '[class*="employer"]'):
+        try:
+            el = dlg.query_selector(sel)
+            if el:
+                t = (el.inner_text() or "").strip()
+                if t:
+                    return t.replace("\n", " ")[:60]
+        except Exception:
+            continue
+    return ""
+
+
+def _instahyre_apply_btn(dlg):
+    """The 'Apply' CTA inside the open modal (not 'Not interested')."""
+    for sel in ('button:has-text("Apply")', 'a:has-text("Apply")'):
+        try:
+            el = dlg.query_selector(sel)
+            if el and el.is_visible() and "not" not in (el.inner_text() or "").lower():
+                return el
+        except Exception:
+            continue
+    return None
+
+
+_INSTAHYRE_LOADING_MARKERS = ("hold on", "loading", "please wait")
+
+
+def _instahyre_title_ready(title: str) -> bool:
+    """The modal content is lazy-loaded behind a 'Hold on, loading...' placeholder <h1>; the
+    REAL job title only counts once that placeholder is gone."""
+    t = (title or "").strip().lower()
+    return bool(t) and not any(m in t for m in _INSTAHYRE_LOADING_MARKERS)
+
+
+def _instahyre_open_modal(page, view_btn):
+    """Click a row's View and wait until the modal's content has FULLY loaded — a real (non-
+    'loading') <h1> title AND the Apply footer both present. AngularJS attaches the ng-click
+    handler a digest AFTER the button paints, so a too-early click is a silent no-op; re-click
+    ONLY while no modal is open (re-clicking with a modal open lands on the background page —
+    that was the 'scrolling the background' bug). Returns (dlg, title) or (None, '')."""
+    for _ in range(3):
+        if not _instahyre_modal(page):
+            try:
+                view_btn.scroll_into_view_if_needed()
+                view_btn.click()
+            except Exception:
+                return (None, "")
+        for _ in range(12):           # ~4.8s for the lazy content to render
+            page.wait_for_timeout(400)
+            dlg = _instahyre_modal(page)
+            if dlg:
+                title = _instahyre_modal_title(dlg)
+                if _instahyre_title_ready(title) and _instahyre_apply_btn(dlg):
+                    return (dlg, title)
+        # content still not ready: if a modal IS open, loop WITHOUT re-clicking (just wait more);
+        # only the `not _instahyre_modal` guard above will re-click when nothing is open.
+    dlg = _instahyre_modal(page)
+    title = _instahyre_modal_title(dlg) if dlg else ""
+    return (dlg, title if _instahyre_title_ready(title) else "")
+
+
+def _instahyre_close_modal(page) -> None:
+    """Close the open job modal. Escape is LIVE-VERIFIED to dismiss it; a close button is the
+    fallback. Called between cards so the next 'View' opens cleanly."""
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(700)
+        if not _instahyre_modal(page):
+            return
+        for sel in ('[role="dialog"] button[aria-label="Close"]', '[class*="modal"] [class*="close"]',
+                    'button:has-text("Close")'):
+            el = page.query_selector(sel)
+            if el and el.is_visible():
+                el.click(); page.wait_for_timeout(600); return
+    except Exception:
+        pass
+
+
+def _instahyre_applied(page) -> bool:
+    """Did the application actually register? a success marker anywhere, or the CTA flipping to
+    a done/withdraw state. Used so we never mark 'submitted' just for clicking Apply."""
+    try:
+        body = (page.inner_text("body") or "").lower()
+        if any(m in body for m in _INSTAHYRE_DONE_MARKERS):
+            return True
+        for sel in ('button:has-text("Withdraw")', 'button:has-text("Applied")',
+                    ':text("Interest Sent")', ':text("Application Sent")'):
+            if page.query_selector(sel):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def instahyre_autoapply(profile: dict, query: str, remote: bool, max_apply: int) -> list[dict]:
+    """Apply on Instahyre's profile-targeted Opportunities feed via View -> modal -> Apply.
+    AI/software only (off-target/intern/senior skipped). Fills a short screening step via the
+    resolver when one appears. STOPS on any captcha/login wall; dedupes against the applied-set."""
+    results = []
+    applied = 0
+    try:
+        with browser._context(headless=False) as ctx:
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            url = "https://www.instahyre.com/candidate/opportunities/?matching=true"
+            if not browser._safe_goto(page, url):
+                return [{"company": "-", "outcome": "error", "error": "opportunities page load failed"}]
+            if browser._ats_is_blocked(page):
+                return [{"company": "-", "outcome": "captcha_stop", "error": "security check on feed"}]
+            if any(s in page.url.lower() for s in ("login", "signin", "sign-in", "/auth")):
+                return [{"company": "-", "outcome": "needs_login", "error": "not logged in"}]
+            # The feed is Angular — poll for the per-row View buttons to render.
+            vbtns = []
+            for _ in range(10):
+                page.wait_for_timeout(1200)
+                vbtns = _instahyre_view_buttons(page)
+                if vbtns:
+                    break
+            _shot("instahyre", page, "instahyre_feed.png")
+            if not vbtns:   # flaky Angular feed — one reload retry before giving up
+                browser._safe_goto(page, url)
+                for _ in range(10):
+                    page.wait_for_timeout(1200)
+                    vbtns = _instahyre_view_buttons(page)
+                    if vbtns:
+                        break
+            total = len(vbtns)
+            if not total:
+                return [{"company": "-", "outcome": "skipped:no-jobs-found",
+                         "error": "no opportunity rows found / layout changed / not logged in"}]
+            page.wait_for_timeout(2500)   # let AngularJS finish linking ng-click handlers
+            _say(f"  -> Instahyre: {total} opportunity row(s) in feed")
+            processed, i, guard = set(), 0, 0
+            while i < total and applied < max_apply and guard < total * 2 + 5:
+                guard += 1
+                # Re-query each iteration — Angular re-renders the list as modals open/close.
+                vbtns = _instahyre_view_buttons(page)
+                if i >= len(vbtns):
+                    break
+                # Open the row's modal (click-retry handles the AngularJS ng-click race) and
+                # wait until its <h1> title has rendered — an empty wrapper would read as a
+                # titleless card and get skipped silently.
+                dlg, title = _instahyre_open_modal(page, vbtns[i])
+                _dbg("instahyre", f"  [instahyre] row {i+1}: modal={bool(dlg)} title={title!r}")
+                if not dlg:
+                    i += 1; continue
+                company = _instahyre_modal_company(dlg) or "this company"
+                tkey = f"{company}|{title}".lower()
+                if not title or tkey in processed:
+                    _instahyre_close_modal(page); i += 1; continue
+                processed.add(tkey)
+                key = f"instahyre:{tkey}"
+                label = f"{title} @ {company}" if company != "this company" else title
+                if _already_applied(key):
+                    _instahyre_close_modal(page); i += 1; continue
+                # Interns ALLOWED, salary IGNORED (operator's call) — only off-target / senior
+                # titles drop. Apply to every on-target AI/software role regardless of stipend.
+                reason = _skip_reason(title, allow_intern=True)
+                if reason:
+                    _dbg("instahyre", f"  [instahyre] skipping {reason} role '{title}'")
+                    results.append({"company": label, "outcome": f"skipped:{reason}", "error": ""})
+                    _instahyre_close_modal(page); i += 1; continue
+                r = {"company": label, "outcome": "", "error": ""}
+                try:
+                    if browser._ats_is_blocked(page):
+                        r["outcome"] = "captcha_stop"; results.append(r)
+                        _say(f"  -> Instahyre {label}: captcha_stop — stopping"); break
+                    ap = _instahyre_apply_btn(dlg)
+                    _dbg("instahyre", f"  [instahyre] {title}: apply button = {bool(ap)}")
+                    if not ap:
+                        r["outcome"] = "skipped:no-apply-button"
+                    else:
+                        ap.click()
+                        page.wait_for_timeout(1800)
+                        _shot("instahyre", page, f"instahyre_apply_{i+1}.png")
+                        # A screening step (expected CTC / notice period) may appear; fill via the
+                        # resolver and submit. Only mark submitted on a real success signal.
+                        outcome = "skipped:no-confirm"
+                        for step in range(4):
+                            if browser._ats_is_blocked(page):
+                                outcome = "captcha_stop"; break
+                            if _instahyre_applied(page):
+                                outcome = "submitted"; break
+                            browser._fill_external_form(page, profile, upload_cv=False,
+                                                        company=company, role=title)
+                            page.wait_for_timeout(700)
+                            miss = browser._ext_missing_required(page)
+                            fwd = None
+                            for sel in ('button:has-text("Submit")', 'button:has-text("Send")',
+                                        'button:has-text("Confirm")', 'button:has-text("Save and continue")',
+                                        'button:has-text("Continue")', 'button:has-text("Save")'):
+                                el = page.query_selector(sel)
+                                if el and el.is_visible() and el.get_attribute("disabled") is None:
+                                    fwd = el; break
+                            if fwd and miss == 0:
+                                fwd.click()
+                                page.wait_for_timeout(1800)
+                                if _instahyre_applied(page):
+                                    outcome = "submitted"; break
+                                continue
+                            outcome = ("skipped:required-unanswered" if miss > 0 else "skipped:no-confirm")
+                            break
+                        r["outcome"] = outcome
+                        if outcome == "submitted":
+                            applied += 1
+                            _mark_applied("instahyre", key, label)
+                except Exception as e:  # noqa: BLE001
+                    r["outcome"] = "error"; r["error"] = str(e)[:150]
+                results.append(r)
+                tag = (f"SUBMITTED ({applied}/{max_apply})" if r["outcome"] == "submitted"
+                       else (f"error — {r.get('error','')}" if r["outcome"] == "error" else r["outcome"]))
+                _say(f"  -> Instahyre {label}: {tag}")
+                if r["outcome"] == "captcha_stop":
+                    break
+                _instahyre_close_modal(page)
+                i += 1
+                _human_pause(page, 6, 14) if r["outcome"] == "submitted" else page.wait_for_timeout(1100)
+    except Exception as e:  # noqa: BLE001
+        log_event("platforms", "instahyre_autoapply", "error", str(e))
     return results
 
 

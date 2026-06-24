@@ -305,6 +305,23 @@
           <div class="aac-result hidden" data-result="cutshort"></div>
         </div>
 
+        <div class="aac-card" data-platform="instahyre">
+          <div class="aac-card-head">
+            <span class="aac-ico aac-ico-ih">ih</span>
+            <div class="aac-card-title">
+              <strong>Instahyre</strong>
+              <span class="aac-sub">India recruiter feed. One-click "I'm Interested"; AI/software only.</span>
+            </div>
+            <span class="aac-badge aac-badge-warn" title="ToS-restricted. Stops on any security check.">ToS risk</span>
+          </div>
+          <div class="aac-actions">
+            <input type="text" class="aac-q" data-q="instahyre" placeholder="feed is profile-targeted — query unused" disabled />
+            <input type="number" class="aac-n" data-n="instahyre" min="1" max="15" placeholder="#" title="How many to apply to (blank = daily cap)" />
+            <button type="button" class="btn-find aac-run" data-run="instahyre">Auto-apply</button>
+          </div>
+          <div class="aac-result hidden" data-result="instahyre"></div>
+        </div>
+
         <div class="aac-card" data-platform="wellfound">
           <div class="aac-card-head">
             <span class="aac-ico aac-ico-wf">wf</span>
@@ -341,7 +358,7 @@
 
       </div>
       <p class="li-hint">
-        Each platform needs a one-time login: <code>py -3.11 formtool.py platlogin &lt;yc|cutshort|ziprecruiter|wellfound&gt;</code>.
+        Each platform needs a one-time login: <code>py -3.11 formtool.py platlogin &lt;yc|cutshort|ziprecruiter|wellfound|instahyre&gt;</code>.
         These three <b>prohibit automation in their ToS</b> (account risk you've accepted) — every run is low-volume and
         <b>stops on any captcha/security check</b>. First runs validate the page layout live.
       </p>

@@ -347,7 +347,8 @@ async function runLiAutoApply(btn) {
 
 // ===== Other platforms: YC / Cutshort / ZipRecruiter ================
 
-const PLATFORM_LABEL = { yc: "Y Combinator", cutshort: "Cutshort", ziprecruiter: "ZipRecruiter" };
+const PLATFORM_LABEL = { yc: "Y Combinator", cutshort: "Cutshort", ziprecruiter: "ZipRecruiter",
+  wellfound: "Wellfound", instahyre: "Instahyre" };
 
 async function runPlatformApply(platform, query, btn) {
   const label = PLATFORM_LABEL[platform] || platform;

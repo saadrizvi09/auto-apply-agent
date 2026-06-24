@@ -32,9 +32,10 @@ _CAPS = {
     "cutshort": _cap("CUTSHORT_DAILY_CAP", 12),
     "ziprecruiter": _cap("ZIP_DAILY_CAP", 6),
     "wellfound": _cap("WELLFOUND_DAILY_CAP", 15),
+    "instahyre": _cap("INSTAHYRE_DAILY_CAP", 15),
 }
 _LABEL = {"yc": "Y Combinator", "cutshort": "Cutshort", "ziprecruiter": "ZipRecruiter",
-          "wellfound": "Wellfound"}
+          "wellfound": "Wellfound", "instahyre": "Instahyre"}
 
 
 def _used_today(session, platform: str) -> int:
@@ -96,6 +97,8 @@ def autoapply(platform: str, query: str = "", location: str = "", remote: bool =
         results = platforms.cutshort_autoapply(profile, query, remote, remaining)
     elif platform == "wellfound":
         results = platforms.wellfound_autoapply(profile, query, remote, remaining)
+    elif platform == "instahyre":
+        results = platforms.instahyre_autoapply(profile, query, remote, remaining)
     else:  # ziprecruiter
         results = platforms.ziprecruiter_autoapply(profile, query or "software engineer",
                                                    location or "Remote", remaining)
